@@ -94,6 +94,39 @@ fn a_rejected_display_configuration_blocks_and_shows_qemus_message() {
 }
 
 #[test]
+fn a_qemu_without_its_display_module_is_one_problem_named_for_what_it_is() {
+    let host = FakeHost::healthy("nodisplay");
+    host.configure_qemu(r#"{"not_installed": ["ui-dbus"]}"#);
+    let report = doctor::run(&host.env());
+    let devices = check(&report, "devices");
+    assert_eq!(devices.status, Status::Failed);
+    assert_eq!(
+        devices.summary,
+        "QEMU is installed without its D-Bus display module, which roomy shows the screen through"
+    );
+    assert_eq!(devices.fix.as_deref(), Some("That is a package of its own on this system. Run: roomy setup"));
+    assert_eq!(devices.log.as_deref(), Some("qemu-system-x86_64: Display 'dbus' is not available."));
+    // Accelerated graphics need the same display: not a second problem, and not a missing graphics driver.
+    assert_eq!(check(&report, "gpu").status, Status::Skipped);
+    assert_eq!(report.count(Status::Warning), 0);
+}
+
+#[test]
+fn a_missing_device_is_named() {
+    let host = FakeHost::healthy("nodevice");
+    host.configure_qemu(r#"{"not_installed": ["virtio-vga-gl"]}"#);
+    let report = doctor::run(&host.env());
+    assert_eq!(check(&report, "devices").status, Status::Ok);
+    let gpu = check(&report, "gpu");
+    assert_eq!(gpu.status, Status::Warning);
+    assert_eq!(
+        gpu.summary,
+        "QEMU is installed without the 'virtio-vga-gl' device; the GPU acceleration switch will be unavailable"
+    );
+    assert_eq!(report.count(Status::Warning), 1);
+}
+
+#[test]
 fn when_no_vm_can_start_the_remaining_trials_are_skipped() {
     let host = FakeHost::healthy("nokvm");
     host.configure_qemu(r#"{"reject": ["kvm"]}"#);

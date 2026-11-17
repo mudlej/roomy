@@ -44,8 +44,8 @@ fn act(env: &Env, folder: &Folder, action: &str) -> Result<Option<String>> {
         "status" => return Ok(Some(control::status(env, folder).word().to_owned())),
         "start" => {
             let was_suspended = folder.is_suspended();
-            let exe =
-                std::env::current_exe().map_err(|e| Error::new(format!("cannot locate the roomy program: {e}")))?;
+            let exe = roomy_core::env::own_program()
+                .map_err(|e| Error::new(format!("cannot locate the roomy program: {e}")))?;
             control::start(env, folder, &exe)?;
             return Ok(Some(if was_suspended { "running (continued from saved state)" } else { "running" }.to_owned()));
         }

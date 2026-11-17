@@ -189,6 +189,19 @@ impl Folder {
         self.dir.join("firmware-vars.fd")
     }
 
+    /// The image format of this VM's firmware variables, read from the file itself.
+    ///
+    /// Distributions ship the template it is copied from as a plain image or as qcow2, so a VM
+    /// made on one computer and moved to another can differ from what the firmware installed
+    /// there would suggest. `None` when the file cannot be read.
+    pub fn firmware_vars_format(&self) -> Option<&'static str> {
+        use std::io::Read;
+        let mut magic = [0u8; 4];
+        let mut file = fs::File::open(self.firmware_vars()).ok()?;
+        let read = file.read(&mut magic).ok()?;
+        Some(if read == magic.len() && magic == *b"QFI\xfb" { "qcow2" } else { "raw" })
+    }
+
     pub fn log_dir(&self) -> PathBuf {
         self.dir.join("logs")
     }
@@ -273,11 +286,15 @@ impl Folder {
 
 /// Creates a new VM folder under `parent`, named after the VM.
 pub fn create(env: &Env, parent: &Path, new: NewVm) -> Result<Folder> {
-    let qemu_path =
-        env.find_program(host::QEMU_PROGRAM).ok_or_else(|| err!("QEMU is not installed (run: roomy setup)"))?;
-    let qemu_img = env.find_program("qemu-img").ok_or_else(|| err!("qemu-img is not installed (run: roomy setup)"))?;
-    let firmware = host::find_firmware(env)
-        .ok_or_else(|| err!("no UEFI firmware for virtual machines found (run: roomy doctor)"))?;
+    let qemu_path = env
+        .find_program(host::QEMU_PROGRAM)
+        .ok_or_else(|| err!("QEMU is not installed (run: {} setup)", crate::env::roomy_command()))?;
+    let qemu_img = env
+        .find_program("qemu-img")
+        .ok_or_else(|| err!("qemu-img is not installed (run: {} setup)", crate::env::roomy_command()))?;
+    let firmware = host::find_firmware(env).ok_or_else(|| {
+        err!("no UEFI firmware for virtual machines found (run: {} doctor)", crate::env::roomy_command())
+    })?;
 
     let config = Config {
         schema: SCHEMA,
@@ -320,6 +337,7 @@ pub fn create(env: &Env, parent: &Path, new: NewVm) -> Result<Folder> {
         let size = format!("{}G", new.disk_gb);
         match &new.existing_disk {
             Some(source) => {
+                check_importable(&qemu_img, source)?;
                 fs::copy(source, &disk).context(format!("cannot copy disk image {}", source.display()))?;
                 let current = disk_virtual_size(&qemu_img, &disk)?;
                 if new.disk_gb << 30 > current {
@@ -337,14 +355,40 @@ pub fn create(env: &Env, parent: &Path, new: NewVm) -> Result<Folder> {
     Ok(folder)
 }
 
-/// The size the guest sees, in bytes. `-U` lets this work while a running VM holds the image.
-pub(crate) fn disk_virtual_size(qemu_img: &Path, disk: &Path) -> Result<u64> {
+/// A VM's disk can start as a copy of `source` when that is one complete qcow2 file: the copy
+/// is used as qcow2, and it is all that is copied.
+fn check_importable(qemu_img: &Path, source: &Path) -> Result<()> {
+    let info = disk_info(qemu_img, source)?;
+    let format = info["format"].as_str().unwrap_or("unknown");
+    let shown = source.display();
+    if format != "qcow2" {
+        return Err(err!(
+            "{shown} is a {format} disk image, and roomy starts from qcow2 images. Convert it first: \
+             qemu-img convert -O qcow2 '{shown}' converted.qcow2"
+        ));
+    }
+    if let Some(base) = info["backing-filename"].as_str() {
+        return Err(err!(
+            "{shown} only holds the changes made to another image ({base}). Make a complete image of it first: \
+             qemu-img convert -O qcow2 '{shown}' complete.qcow2"
+        ));
+    }
+    Ok(())
+}
+
+/// What qemu-img says about an image. `-U` lets this work while a running VM holds the image.
+fn disk_info(qemu_img: &Path, disk: &Path) -> Result<serde_json::Value> {
     let out = run_capture(qemu_img, &["info", "-U", "--output=json", &disk.to_string_lossy()], Duration::from_secs(30))
         .context("cannot run qemu-img")?;
-    serde_json::from_str::<serde_json::Value>(&out.stdout)
-        .ok()
-        .and_then(|info| info["virtual-size"].as_u64())
-        .ok_or_else(|| err!("{} is not a usable disk image: {}", disk.display(), out.stderr.trim()))
+    serde_json::from_str(&out.stdout)
+        .map_err(|_| err!("{} is not a usable disk image: {}", disk.display(), out.stderr.trim()))
+}
+
+/// The size the guest sees, in bytes.
+pub(crate) fn disk_virtual_size(qemu_img: &Path, disk: &Path) -> Result<u64> {
+    disk_info(qemu_img, disk)?["virtual-size"]
+        .as_u64()
+        .ok_or_else(|| err!("{} is not a usable disk image: qemu-img did not tell its size", disk.display()))
 }
 
 pub(crate) fn run_tool(program: &Path, args: &[&str]) -> Result<()> {

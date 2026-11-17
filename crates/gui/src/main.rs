@@ -6,6 +6,7 @@
 
 mod create;
 mod doctor;
+mod fields;
 mod guest;
 mod lab;
 mod library;
@@ -20,7 +21,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-const APP_ID: &str = "com.mudlej.Roomy";
+use roomy_core::launcher::APP_ID;
 
 /// What every window needs to know about its surroundings.
 pub struct Context {
@@ -99,6 +100,14 @@ fn main() -> glib::ExitCode {
     };
 
     let lab_dir = lab::directory();
+    // A single-file roomy has no launcher entry unless it keeps one itself, and without the entry
+    // the desktop has no icon for this window. Not for a test run, which is nobody's application.
+    if lab_dir.is_none()
+        && let Some(file) = roomy_core::env::single_file_release()
+        && let Err(e) = roomy_core::launcher::keep_for_user(&file)
+    {
+        eprintln!("roomy-gui: could not add roomy to the application menu: {e}");
+    }
     // A test run must not be swallowed by a window the user already has open.
     let flags = if lab_dir.is_some() { gio::ApplicationFlags::NON_UNIQUE } else { gio::ApplicationFlags::empty() };
     let app = adw::Application::builder().application_id(APP_ID).flags(flags).build();
@@ -108,7 +117,7 @@ fn main() -> glib::ExitCode {
             open.window().present();
             return;
         }
-        // The icon installed under the application's name (see packaging/).
+        // The icon filed under the application's name: by the package, or by the lines above.
         gtk::Window::set_default_icon_name(APP_ID);
         let library = library::Library::open(&context, app);
         if let Some(dir) = lab_dir.clone() {

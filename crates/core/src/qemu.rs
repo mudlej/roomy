@@ -8,7 +8,7 @@ use crate::error::Context;
 use crate::host::Firmware;
 use crate::process::run_capture;
 use crate::vm::{Config, Folder};
-use crate::{Result, err};
+use crate::{Result, catalog, err};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -96,7 +96,10 @@ pub fn args(launch: &Launch) -> Vec<String> {
         "-drive",
         format!("if=pflash,unit=0,readonly=on,format={},file={}", firmware.code_format, esc(&firmware.code)),
     );
-    a.opt("-drive", format!("if=pflash,unit=1,format={},file={}", firmware.vars_format, esc(&folder.firmware_vars())));
+    // The variable store was copied from whatever firmware was installed when the VM was made;
+    // its own format counts, not that of the firmware installed now.
+    let vars_format = folder.firmware_vars_format().unwrap_or(firmware.vars_format.as_str());
+    a.opt("-drive", format!("if=pflash,unit=1,format={vars_format},file={}", esc(&folder.firmware_vars())));
 
     for port in 1..=HOTPLUG_PORTS {
         a.opt("-device", format!("pcie-root-port,id=hotplug{port},chassis={port},port={}", 0x10 + port));
@@ -158,6 +161,16 @@ pub fn args(launch: &Launch) -> Vec<String> {
         a.opt("-chardev", format!("socket,id=share{index},path={}", esc(&sockets.share(index))));
         a.opt("-device", format!("vhost-user-fs-pci,chardev=share{index},tag={}", share.name));
     }
+    if !config.shared_folders.is_empty() {
+        // Has the guest mount the folders by itself when it boots. The list travels in the
+        // machine's firmware tables, where systemd (254 and newer) looks for mounts to add to
+        // the guest's own; a guest that does not know of this simply finds nothing mounted.
+        let mounts = catalog::fstab(config.shared_folders.iter().map(|share| share.name.as_str()));
+        a.opt(
+            "-smbios",
+            format!("type=11,value=io.systemd.credential.binary:fstab.extra={}", base64(mounts.as_bytes())),
+        );
+    }
 
     if *restoring {
         a.opt("-incoming", "defer");
@@ -202,6 +215,23 @@ fn parse_default_machine(machine_help: &str) -> Option<String> {
     Some(rest.split(')').next()?.trim().to_owned())
 }
 
+/// Standard base64, with padding.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let group = chunk.iter().fold(0u32, |group, byte| group << 8 | u32::from(*byte)) << (8 * (3 - chunk.len()));
+        for position in 0..4 {
+            if position <= chunk.len() {
+                text.push(ALPHABET[(group >> (18 - 6 * position) & 63) as usize] as char);
+            } else {
+                text.push('=');
+            }
+        }
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +241,29 @@ mod tests {
         launch_args_on(config, restoring, None)
     }
 
+    thread_local! {
+        /// What the next VM folder's firmware variables file holds, if it is to have one.
+        static VARS_FILE: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[test]
+    fn the_firmware_variables_keep_the_format_they_were_made_in() {
+        let config = example_config();
+        let vars_format = |content: Option<&[u8]>| {
+            VARS_FILE.with(|vars| vars.replace(content.map(<[u8]>::to_vec)));
+            let args = launch_args(&config, false);
+            VARS_FILE.with(|vars| vars.replace(None));
+            let drive = args.iter().find(|arg| arg.starts_with("if=pflash,unit=1")).unwrap().clone();
+            drive.split(',').find_map(|part| part.strip_prefix("format=").map(str::to_owned)).unwrap()
+        };
+        // The firmware installed here says "raw" (see `launch_args_on`); a VM brought from a
+        // distribution that ships qcow2 firmware is still opened as qcow2, and the other way round.
+        assert_eq!(vars_format(Some(b"QFI\xfb\0\0\0\x03 and so on")), "qcow2");
+        assert_eq!(vars_format(Some(&[0u8; 64])), "raw");
+        // No file yet (it is copied in before the first start): what the installed firmware says.
+        assert_eq!(vars_format(None), "raw");
+    }
+
     fn launch_args_on(config: &Config, restoring: bool, render_node: Option<&Path>) -> Vec<String> {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -218,6 +271,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(crate::vm::CONFIG_FILE), config.to_toml()).unwrap();
         let folder = Folder::open(&dir).unwrap();
+        if let Some(vars) = VARS_FILE.with(|vars| vars.borrow().clone()) {
+            std::fs::write(folder.firmware_vars(), vars).unwrap();
+        }
         let firmware = Firmware {
             code: "/fw/CODE.fd".into(),
             code_format: "raw".into(),
@@ -263,6 +319,15 @@ mod tests {
     }
 
     #[test]
+    fn base64_matches_the_standard() {
+        let encoded = ["", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy"];
+        for (length, expected) in encoded.iter().enumerate() {
+            assert_eq!(base64(&b"foobar"[..length]), *expected);
+        }
+        assert_eq!(base64(&[0xfb, 0xff, 0xfe]), "+//+");
+    }
+
+    #[test]
     fn gpu_acceleration_switches_display_and_graphics_card_together() {
         let mut config = example_config();
         config.features.gpu_acceleration = true;
@@ -296,6 +361,15 @@ mod tests {
         assert!(has(&args, "-chardev", "socket,id=share0,path=/run/vm/share-0.sock"));
         assert!(has(&args, "-device", "vhost-user-fs-pci,chardev=share0,tag=projects"));
         assert!(has(&args, "-device", "vhost-user-fs-pci,chardev=share1,tag=music"));
+        // The guest is told where to mount them: the two lines of catalog::fstab, encoded.
+        let mounts = "projects /mnt/projects virtiofs defaults,nofail,x-gvfs-show 0 0\n\
+                      music /mnt/music virtiofs defaults,nofail,x-gvfs-show 0 0\n";
+        assert!(has(
+            &args,
+            "-smbios",
+            &format!("type=11,value=io.systemd.credential.binary:fstab.extra={}", base64(mounts.as_bytes()))
+        ));
+        assert!(!launch_args(&example_config(), false).contains(&"-smbios".to_owned()));
         assert_eq!(&args[args.len() - 2..], ["-incoming", "defer"]);
         assert!(!launch_args(&example_config(), false).contains(&"-incoming".to_owned()));
     }

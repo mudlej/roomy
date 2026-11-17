@@ -8,6 +8,7 @@ pub mod env;
 pub mod error;
 pub mod fdpass;
 pub mod host;
+pub mod launcher;
 pub mod library;
 pub mod process;
 pub mod qemu;

@@ -1,11 +1,10 @@
-# Builds roomy from this checkout. In this directory:  makepkg -si
+# Builds roomy from this checkout: `just package-arch` (the package lands in work/dist).
 pkgname=roomy
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Simple, reliable virtual machines on KVM and QEMU"
 arch=('x86_64')
-# The licence has not been chosen yet.
-license=('unknown')
+license=('GPL-3.0-or-later')
 depends=('qemu-desktop' 'qemu-img' 'virtiofsd' 'edk2-ovmf' 'gtk4' 'libadwaita' 'libpulse')
 makedepends=('cargo' 'pkgconf')
 options=('!debug')
@@ -22,4 +21,5 @@ package() {
   install -Dm755 target/release/roomy-gui "$pkgdir/usr/bin/roomy-gui"
   install -Dm644 packaging/com.mudlej.Roomy.desktop "$pkgdir/usr/share/applications/com.mudlej.Roomy.desktop"
   install -Dm644 packaging/com.mudlej.Roomy.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.mudlej.Roomy.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/roomy/LICENSE"
 }

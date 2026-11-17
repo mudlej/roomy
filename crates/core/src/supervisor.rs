@@ -105,10 +105,12 @@ impl Supervisor {
             current.clone()
         };
 
-        let qemu_path =
-            env.find_program(host::QEMU_PROGRAM).ok_or_else(|| err!("QEMU is not installed (run: roomy setup)"))?;
-        let firmware = host::find_firmware(env)
-            .ok_or_else(|| err!("no UEFI firmware for virtual machines found (run: roomy doctor)"))?;
+        let qemu_path = env
+            .find_program(host::QEMU_PROGRAM)
+            .ok_or_else(|| err!("QEMU is not installed (run: {} setup)", crate::env::roomy_command()))?;
+        let firmware = host::find_firmware(env).ok_or_else(|| {
+            err!("no UEFI firmware for virtual machines found (run: {} doctor)", crate::env::roomy_command())
+        })?;
         check_files(&folder, &mut config, &firmware, restoring)?;
 
         let runtime = RuntimeDir(control::prepare_runtime_dir(env, &folder)?);
@@ -578,8 +580,9 @@ fn start_share_daemons(env: &Env, folder: &Folder, config: &Config, sockets: &So
     if config.shared_folders.is_empty() {
         return Ok(daemons);
     }
-    let virtiofsd = host::find_virtiofsd(env)
-        .ok_or_else(|| err!("shared folders need virtiofsd, which is not installed (run: roomy setup)"))?;
+    let virtiofsd = host::find_virtiofsd(env).ok_or_else(|| {
+        err!("shared folders need virtiofsd, which is not installed (run: {} setup)", crate::env::roomy_command())
+    })?;
     // SAFETY: getuid and getgid cannot fail.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     for (index, share) in config.shared_folders.iter().enumerate() {

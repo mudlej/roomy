@@ -6,6 +6,8 @@ script. Keys:
   version         version string to report (default 11.1.3)
   reject          list of substrings; an argument containing one makes the
                   fake fail like QEMU does (message on stderr, exit status 1)
+  not_installed   list of parts packaged separately that are absent: "ui-dbus",
+                  or a device name; using one fails with QEMU's own words
   kvm             false: report that KVM is not enabled
   migrate_fail    saving state fails with this message
   incoming_fail   loading state fails with this message
@@ -40,6 +42,14 @@ if args == ["-machine", "help"]:
 for bad in conf().get("reject", []):
     if any(bad in a for a in args):
         print(f"qemu-system-x86_64: fake refusal of '{bad}'", file=sys.stderr)
+        sys.exit(1)
+for part in conf().get("not_installed", []):
+    following = lambda option: [b for a, b in zip(args, args[1:]) if a == option]
+    if part == "ui-dbus" and any(d.split(",")[0] == "dbus" for d in following("-display")):
+        print("qemu-system-x86_64: Display 'dbus' is not available.", file=sys.stderr)
+        sys.exit(1)
+    if any(d.split(",")[0] == part for d in following("-device")):
+        print(f"qemu-system-x86_64: -device {part}: '{part}' is not a valid device model name", file=sys.stderr)
         sys.exit(1)
 log("start " + " ".join(args))
 signal.signal(signal.SIGTERM, lambda *_: os._exit(0))

@@ -41,6 +41,11 @@ impl fmt::Display for Version {
 pub struct OsRelease {
     pub id: String,
     pub id_like: Vec<String>,
+    /// The edition of the distribution, where it has several (`silverblue`, `transactional`, ...).
+    pub variant_id: String,
+    pub version_id: String,
+    /// The release's code name where the distribution uses them (`trixie`, `resolute`).
+    pub version_codename: String,
     pub pretty_name: String,
 }
 
@@ -53,6 +58,9 @@ impl OsRelease {
             match key.trim() {
                 "ID" => os.id = value.to_ascii_lowercase(),
                 "ID_LIKE" => os.id_like = value.split_whitespace().map(str::to_ascii_lowercase).collect(),
+                "VARIANT_ID" => os.variant_id = value.to_ascii_lowercase(),
+                "VERSION_ID" => os.version_id = value.to_owned(),
+                "VERSION_CODENAME" => os.version_codename = value.to_ascii_lowercase(),
                 "PRETTY_NAME" => os.pretty_name = value.to_owned(),
                 _ => {}
             }
@@ -73,6 +81,27 @@ pub fn os_release(env: &Env) -> OsRelease {
         os.pretty_name = if os.id.is_empty() { "unknown Linux".to_owned() } else { os.id.clone() };
     }
     os
+}
+
+/// Memory of this computer in MB.
+pub fn memory_mb(env: &Env) -> Option<u64> {
+    let meminfo = env.read("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
+    Some(line.split_whitespace().nth(1)?.parse::<u64>().ok()? / 1024)
+}
+
+/// Free space in whole GB where `path` is kept or, while `path` does not exist yet, where its
+/// nearest existing parent is.
+pub fn free_space_gb(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let existing = path.ancestors().find(|ancestor| ancestor.exists())?;
+    let name = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `name` is a valid C string and `stats` is a properly sized, writable statvfs.
+    let stats = unsafe {
+        let mut stats = std::mem::zeroed::<libc::statvfs>();
+        (libc::statvfs(name.as_ptr(), &mut stats) == 0).then_some(stats)?
+    };
+    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64) >> 30)
 }
 
 pub fn kernel_release(env: &Env) -> String {

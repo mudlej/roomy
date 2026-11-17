@@ -106,12 +106,14 @@ fn open_window() -> ExitCode {
         if let Some(log) = &check.log {
             eprintln!("{}", log.trim_end());
         }
-        eprintln!("\nRun 'roomy doctor' to see what is missing, or 'roomy setup' to install it.");
+        let roomy = roomy_core::env::roomy_command();
+        eprintln!("\nRun '{roomy} doctor' to see what is missing, or '{roomy} setup' to install it.");
         eprintln!("Virtual machines can be used without the window: see 'roomy --help'.");
         return ExitCode::from(EXIT_PROBLEMS);
     };
     let mut command = Command::new(&program);
-    if let Ok(this) = std::env::current_exe() {
+    // What the window starts for each VM's supervisor, which has to outlive the window.
+    if let Ok(this) = roomy_core::env::own_program() {
         command.env("ROOMY_PROGRAM", this);
     }
     // Replaces this process; only returns if that failed.
@@ -164,7 +166,7 @@ fn run_doctor(args: &[String]) -> ExitCode {
         }
     } else if !as_json && !report.can_run_vms() {
         println!("\nThe text above is the full report: copy it when asking for help,");
-        println!("or save it with: roomy doctor --report-file roomy-doctor.txt");
+        println!("or save it with: {} doctor --report-file roomy-doctor.txt", roomy_core::env::roomy_command());
     }
     exit_code_for(&report)
 }
@@ -208,41 +210,64 @@ fn run_setup(args: &[String]) -> ExitCode {
     }
 
     let os = host::os_release(&env);
-    let Some(plan) = setup::install_plan(&os) else {
-        println!("\nroomy does not know how to install packages on {} yet.", os.pretty_name);
-        println!("Install these with your package manager, then run 'roomy doctor' again:");
-        for component in setup::REQUIRED_COMPONENTS {
-            println!("  - {component}");
+    // Lets the advice ask the package manager what it has on offer; nothing is changed by that.
+    let ask = |program: &str, args: &[&str]| setup::query(&env, program, args);
+    let plan = match setup::advice(&env, &os, &ask) {
+        setup::Advice::Install(plan) => plan,
+        setup::Advice::ByHand(what_to_do) => {
+            println!("\nroomy cannot install what is missing by itself on {}.", os.pretty_name);
+            println!("{what_to_do}");
+            return ExitCode::from(EXIT_USAGE);
         }
-        return ExitCode::from(EXIT_USAGE);
+        setup::Advice::Unknown => {
+            println!("\nroomy does not know how to install packages on {} yet.", os.pretty_name);
+            println!(
+                "Install these with your package manager, then run '{} doctor' again:",
+                roomy_core::env::roomy_command()
+            );
+            for component in setup::REQUIRED_COMPONENTS {
+                println!("  - {component}");
+            }
+            return ExitCode::from(EXIT_USAGE);
+        }
     };
 
-    println!("\nroomy can install the required packages with this command (run as administrator):");
-    println!("  {}", plan.command_line());
+    let lines = plan.command_lines();
+    let commands = if lines.len() == 1 { "this command" } else { "these commands" };
+    println!("\nroomy can install the required packages with {commands} (run as administrator):");
+    for line in &lines {
+        println!("  {line}");
+    }
+    for note in &plan.notes {
+        println!("Note: {note}");
+    }
     println!("Problems that are not about missing packages (for example KVM access) are not changed by this.");
     if !assume_yes && !confirm("Run it now?") {
         println!("Nothing was changed.");
         return ExitCode::from(EXIT_USAGE);
     }
 
-    // Having been told yes already, the package manager must not stop to ask again.
-    let to_run = if assume_yes { plan.unattended_command() } else { plan.command.clone() };
-    let mut command = match privileged(&env, &to_run) {
-        Some(command) => command,
-        None => {
-            println!("No way to become administrator was found (sudo or pkexec). Run the command above as root.");
-            return ExitCode::from(EXIT_USAGE);
-        }
+    // sudo asks for its password on the terminal this was started from, whatever became of the input.
+    let at_a_terminal = std::fs::File::open("/dev/tty").is_ok();
+    let session = setup::Session::of_this_process(assume_yes, at_a_terminal);
+    let Some(commands) = setup::elevated(&plan, session, &env, &ask) else {
+        println!("No way to become administrator was found (sudo or pkexec). Run the above as root.");
+        return ExitCode::from(EXIT_USAGE);
     };
-    match command.status() {
-        Ok(status) if status.success() => {}
-        Ok(status) => {
-            println!("\nThe package manager did not finish successfully ({status}). Its messages are above.");
-            return ExitCode::from(EXIT_USAGE);
-        }
-        Err(e) => {
-            println!("\nCould not run the package manager: {e}");
-            return ExitCode::from(EXIT_USAGE);
+    for command in &commands {
+        match Command::new(&command[0]).args(&command[1..]).status() {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                println!("\nThe package manager did not finish successfully ({status}). Its messages are above.");
+                if let Some(hint) = &plan.if_it_fails {
+                    println!("{hint}");
+                }
+                return ExitCode::from(EXIT_USAGE);
+            }
+            Err(e) => {
+                println!("\nCould not run the package manager: {e}");
+                return ExitCode::from(EXIT_USAGE);
+            }
         }
     }
 
@@ -266,20 +291,4 @@ fn confirm(question: &str) -> bool {
         return false;
     }
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
-
-/// Wraps a command so that it runs as root.
-fn privileged(env: &Env, command: &[&str]) -> Option<Command> {
-    // SAFETY: geteuid cannot fail.
-    let is_root = unsafe { libc::geteuid() } == 0;
-    let (program, args) = command.split_first()?;
-    if is_root {
-        let mut direct = Command::new(program);
-        direct.args(args);
-        return Some(direct);
-    }
-    let elevator = env.find_program("sudo").or_else(|| env.find_program("pkexec"))?;
-    let mut elevated = Command::new(elevator);
-    elevated.arg(program).args(args);
-    Some(elevated)
 }

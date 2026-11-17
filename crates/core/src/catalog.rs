@@ -52,15 +52,28 @@ pub fn generic_install_advice() -> String {
     )
 }
 
-/// The command that makes a shared folder appear inside the guest until it restarts.
-pub fn mount_command(share: &str) -> String {
-    format!("sudo mkdir -p /mnt/{share} && sudo mount -t virtiofs {share} /mnt/{share}")
+/// Where a shared folder is found inside the guest.
+pub fn guest_path(share: &str) -> String {
+    format!("/mnt/{share}")
 }
 
-/// The line for the guest's /etc/fstab that mounts a shared folder at every boot.
-/// `nofail` keeps the guest booting when the folder is later removed from the VM.
+/// The command that makes a shared folder appear inside the guest until it restarts, for a
+/// guest that does not mount it by itself.
+pub fn mount_command(share: &str) -> String {
+    let path = guest_path(share);
+    format!("sudo mkdir -p {path} && sudo mount -t virtiofs {share} {path}")
+}
+
+/// The line of a guest's table of mounts (fstab) that mounts a shared folder at every boot.
+/// `nofail` keeps the guest booting when the folder cannot be mounted, and `x-gvfs-show` has
+/// the guest's file manager list it among its places.
 pub fn fstab_line(share: &str) -> String {
-    format!("{share} /mnt/{share} virtiofs defaults,nofail 0 0")
+    format!("{share} {} virtiofs defaults,nofail,x-gvfs-show 0 0", guest_path(share))
+}
+
+/// The mounts of all shared folders named, as lines of a table of mounts.
+pub fn fstab<'a>(shares: impl IntoIterator<Item = &'a str>) -> String {
+    shares.into_iter().map(|share| fstab_line(share) + "\n").collect()
 }
 
 #[cfg(test)]
@@ -86,6 +99,10 @@ mod tests {
     #[test]
     fn shared_folders_mount_under_mnt_by_their_name() {
         assert_eq!(mount_command("docs"), "sudo mkdir -p /mnt/docs && sudo mount -t virtiofs docs /mnt/docs");
-        assert_eq!(fstab_line("docs"), "docs /mnt/docs virtiofs defaults,nofail 0 0");
+        assert_eq!(fstab_line("docs"), "docs /mnt/docs virtiofs defaults,nofail,x-gvfs-show 0 0");
+        assert_eq!(
+            fstab(["docs", "music"]),
+            "docs /mnt/docs virtiofs defaults,nofail,x-gvfs-show 0 0\nmusic /mnt/music virtiofs defaults,nofail,x-gvfs-show 0 0\n"
+        );
     }
 }

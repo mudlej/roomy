@@ -11,8 +11,8 @@ its own. This boots the same VM once per combination of
 and saves a picture of the window each time, with what each side was using.
 Windows will appear on your screen for about four minutes; leave them alone.
 
-Everything is written to lab/results/gpu-<timestamp>/ (also lab/results/latest-gpu).
-Run inside the roomy-lab box:   ./lab/gpu-check.sh
+Everything is written to work/lab/results/gpu-<timestamp>/ (also work/lab/results/latest-gpu).
+Run inside the roomy-lab box:   just lab-gpu
 """
 import contextlib
 import glob
@@ -26,8 +26,8 @@ import engine_check as ec
 import gui_check as gc
 
 TS = ec.TS
-gc.OUT = ec.OUT = OUT = ec.HERE / "results" / f"gpu-{TS}"
-gc.WORK = ec.WORK = WORK = ec.HERE / "work" / f"gpu-{TS}"
+gc.OUT = ec.OUT = OUT = ec.DATA / "results" / f"gpu-{TS}"
+gc.WORK = ec.WORK = WORK = ec.DATA / "scratch" / f"gpu-{TS}"
 os.environ["XDG_CONFIG_HOME"] = str(WORK / "config")
 log, sh, roomy, step, expect = ec.log, ec.sh, ec.roomy, ec.step, ec.expect
 
@@ -97,7 +97,7 @@ def main():
     OUT.mkdir(parents=True)
     WORK.mkdir(parents=True)
     ec._log_file = open(OUT / "run.log", "a")
-    latest = ec.HERE / "results" / "latest-gpu"
+    latest = ec.DATA / "results" / "latest-gpu"
     with contextlib.suppress(OSError):
         if latest.is_symlink():
             latest.unlink()
@@ -128,7 +128,7 @@ def main():
         nodes = sorted(f"/dev/dri/{n}" for card in ec.REPORT["steps"][-1]["data"].get("cards", []) for n in card["render_node"])
         with step("prepare") as d:
             if not ec.BASE_IMAGE.is_file():
-                raise RuntimeError(f"{ec.BASE_IMAGE} is missing: run ./lab/run.sh once first (it downloads the guest image)")
+                raise RuntimeError(f"{ec.BASE_IMAGE} is missing: run just lab-probe once first (it downloads the guest image)")
             key = str(WORK / "id_ed25519")
             sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "roomy-lab", "-f", key])
             folder, _port, created = ec.create_vm("gpu-probe", Path(key + ".pub").read_text().strip(), ["--gpu"])
@@ -171,7 +171,7 @@ def main():
         if not ec.KEEP:
             shutil.rmtree(WORK, ignore_errors=True)
             with contextlib.suppress(OSError):
-                (ec.HERE / "work").rmdir()
+                (ec.DATA / "scratch").rmdir()
         log(f"done. Everything is in {OUT}")
 
 

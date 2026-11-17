@@ -3,6 +3,7 @@ name = "roomy-core"
 description = "roomy's engine: host discovery, QEMU control and health checks. No UI."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 
 [dependencies]

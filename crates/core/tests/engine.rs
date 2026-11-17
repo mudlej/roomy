@@ -111,6 +111,24 @@ fn an_existing_disk_is_copied_and_only_ever_grown() {
 }
 
 #[test]
+fn only_a_complete_qcow2_image_can_start_a_disk() {
+    let host = FakeHost::healthy("fromother");
+    let refused = |content: &str| {
+        let source = host.base.join("other.img");
+        fs::write(&source, content).unwrap();
+        let new = NewVm { existing_disk: Some(source), ..new_vm("refused") };
+        let error = vm::create(&host.env(), &host.base.join("vms"), new).unwrap_err();
+        assert!(!host.base.join("vms/refused").exists(), "nothing is left behind");
+        error.message().to_owned()
+    };
+    let raw = refused(&format!("raw {}", 2u64 << 30));
+    assert!(raw.contains("is a raw disk image") && raw.contains("qemu-img convert -O qcow2"), "{raw}");
+    let overlay = refused(&format!("qcow2 {} base.qcow2", 2u64 << 30));
+    assert!(overlay.contains("only holds the changes made to another image (base.qcow2)"), "{overlay}");
+    assert!(refused("some text").contains("is not a usable disk image"));
+}
+
+#[test]
 fn a_failed_creation_leaves_nothing_behind() {
     let host = FakeHost::healthy("createfail");
     host.configure_qemu_img(r#"{"fail": "No space left on device"}"#);

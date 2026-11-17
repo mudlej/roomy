@@ -2,19 +2,19 @@
 """roomy lab: find out what this host's QEMU stack really does.
 
 Runs a series of small experiments against the installed QEMU and writes
-everything it learns to lab/results/<timestamp>/ (report.json, SUMMARY.txt,
+everything it learns to work/lab/results/<timestamp>/ (report.json, SUMMARY.txt,
 per-process logs, screenshots). Nothing outside the lab/ directory is modified.
 
-Usage:  ./run.sh                 run everything (about 10 minutes plus one image download)
-        ./run.sh features        only the named VM stages (features, suspend, gpu);
+Usage:  just lab-probe                 run everything (about 10 minutes plus one image download)
+        just lab-probe features        only the named VM stages (features, suspend, gpu);
                                  the environment check and the no-guest probes always run
-        ./run.sh followup        second-round questions (guest agent after restore, clock, resize modes)
+        just lab-probe followup        second-round questions (guest agent after restore, clock, resize modes)
 
 Environment knobs:
   ROOMY_LAB_IMAGE    path to an Arch cloud image qcow2 (skips the download)
   ROOMY_LAB_MEM_MB   guest memory, default 4096
   ROOMY_LAB_FILL_MB  random data held in guest memory during suspend, default 1536
-  ROOMY_LAB_KEEP=1   keep lab/work/<timestamp> (disk overlay, state files) afterwards
+  ROOMY_LAB_KEEP=1   keep work/lab/scratch/<timestamp> (disk overlay, state files) afterwards
   ROOMY_LAB_TM       multiply every timeout (default 1, or 6 without KVM)
 """
 import atexit
@@ -35,10 +35,12 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# Everything a run downloads or writes lives under the checkout's work/ folder, which git ignores.
+DATA = HERE.parent / "work" / "lab"
 TS = time.strftime("%Y%m%d-%H%M%S")
-OUT = HERE / "results" / TS
-WORK = HERE / "work" / TS
-CACHE = HERE / "cache"
+OUT = DATA / "results" / TS
+WORK = DATA / "scratch" / TS
+CACHE = DATA / "cache"
 LOGS = OUT / "logs"
 
 IMAGE_URL = "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
@@ -143,7 +145,7 @@ def cleanup():
     if not KEEP:
         shutil.rmtree(WORK, ignore_errors=True)
         with contextlib.suppress(OSError):
-            (HERE / "work").rmdir()
+            (DATA / "scratch").rmdir()
 
 
 def wait_for(predicate, timeout, interval=0.05):
@@ -1656,7 +1658,7 @@ def main():
     base = os.environ.get("XDG_RUNTIME_DIR")
     RUN = tempfile.mkdtemp(prefix="roomy-lab-", dir=base if base and os.access(base, os.W_OK) else "/tmp")
     atexit.register(cleanup)
-    latest = HERE / "results" / "latest"
+    latest = DATA / "results" / "latest"
     with contextlib.suppress(OSError):
         if latest.is_symlink():
             latest.unlink()

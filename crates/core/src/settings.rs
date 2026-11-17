@@ -64,7 +64,9 @@ pub struct Applied {
 
 /// The size of the VM's disk as the guest sees it, in whole GB (rounded up).
 pub fn disk_gb(env: &Env, folder: &Folder, config: &Config) -> Result<u64> {
-    let qemu_img = env.find_program("qemu-img").ok_or_else(|| err!("qemu-img is not installed (run: roomy setup)"))?;
+    let qemu_img = env
+        .find_program("qemu-img")
+        .ok_or_else(|| err!("qemu-img is not installed (run: {} setup)", crate::env::roomy_command()))?;
     let bytes = vm::disk_virtual_size(&qemu_img, &folder.disk_path(config))?;
     Ok(bytes.div_ceil(1 << 30))
 }
@@ -139,8 +141,9 @@ pub fn apply(env: &Env, folder: &Folder, changes: &Changes) -> Result<Vec<Applie
         if running {
             control::request(env, folder, Request::GrowDisk { size_gb })?;
         } else {
-            let qemu_img =
-                env.find_program("qemu-img").ok_or_else(|| err!("qemu-img is not installed (run: roomy setup)"))?;
+            let qemu_img = env
+                .find_program("qemu-img")
+                .ok_or_else(|| err!("qemu-img is not installed (run: {} setup)", crate::env::roomy_command()))?;
             let disk = folder.disk_path(&config);
             vm::run_tool(&qemu_img, &["resize", "-q", &disk.to_string_lossy(), &format!("{size_gb}G")])?;
         }

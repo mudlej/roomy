@@ -1,10 +1,9 @@
 /target
-__pycache__/
 
-# Lab runs: downloaded guest images, scratch VMs and each run's results.
-/lab/cache/
-/lab/work/
-/lab/results/
+# Everything produced locally: the single-file release, downloaded tools, lab runs.
+/work/
+
+__pycache__/
 
 # Left behind by makepkg.
 /packaging/arch/pkg/

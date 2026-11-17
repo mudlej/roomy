@@ -3,6 +3,7 @@ name = "roomy-gui"
 description = "roomy's window: the VM library and each VM's screen"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version = "1.92"
 
 [[bin]]

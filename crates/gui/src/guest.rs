@@ -47,13 +47,19 @@ pub fn show(parent: &impl IsA<gtk::Widget>, config: &Config, guest_agent: Option
     if config.shared_folders.is_empty() {
         folders.set_description(Some("This virtual machine has no shared folders. Add one in its settings."));
     } else {
-        folders.set_description(Some("A shared folder appears inside the guest once it is mounted there."));
+        folders.set_description(Some(
+            "A Linux guest with systemd 254 or newer (2023) mounts each folder by itself when it starts, at the \
+             place named here. In any other guest, run the command inside the guest.",
+        ));
     }
     for share in &config.shared_folders {
-        let shown = share.path.display();
-        folders
-            .add(&command_row(&format!("Mount “{}” ({shown}) now", share.name), &catalog::mount_command(&share.name)));
-        folders.add(&command_row("Line for /etc/fstab, to mount it at every boot", &catalog::fstab_line(&share.name)));
+        let (shown, place) = (share.path.display(), catalog::guest_path(&share.name));
+        folders.add(&crate::plain_row(&shown.to_string(), &format!("In the guest: {place}")));
+        folders.add(&command_row("Mount it by hand, until the guest restarts", &catalog::mount_command(&share.name)));
+        folders.add(&command_row(
+            "Line for the guest's /etc/fstab, to mount it at every boot",
+            &catalog::fstab_line(&share.name),
+        ));
     }
     page.add(&folders);
 

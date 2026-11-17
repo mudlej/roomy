@@ -8,12 +8,16 @@ suspended, continued and shut down from the command line, and a
 GPU-accelerated VM. Windows will appear on your screen for a few minutes;
 leave them alone while it runs.
 
-Everything is written to lab/results/gui-<timestamp>/ (also lab/results/latest-gui).
-Run inside the roomy-lab box:   ./lab/gui-check.sh
+Everything is written to work/lab/results/gui-<timestamp>/ (also work/lab/results/latest-gui).
+Run inside the roomy-lab box:   just lab-gui
 A short run of only the newest checks (sound, microphone, settings, dialogs),
-about two and a half minutes:   ./lab/gui-check.sh quick
+about two and a half minutes:   just lab-gui quick
 A short run of only the pointer and clipboard checks, which install a bare
-graphical session in the guest, about four minutes:   ./lab/gui-check.sh desktop
+graphical session in the guest, about four minutes:   just lab-gui desktop
+The single-file release (just appimage), built and then put through
+the quick checks in place of the separate programs:   just lab-gui appimage
+That same file tried on another distribution, inside a box of it (see
+distrobox.ini), where roomy must first install what it needs:   just lab-distro
 """
 import contextlib
 import json
@@ -27,13 +31,31 @@ from pathlib import Path
 import engine_check as ec
 
 TS = ec.TS
-ec.OUT = OUT = ec.HERE / "results" / f"gui-{TS}"
-ec.WORK = WORK = ec.HERE / "work" / f"gui-{TS}"
+
+
+def distribution():
+    """This system's ID from os-release, for example "fedora"."""
+    with contextlib.suppress(OSError):
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if line.startswith("ID="):
+                return line[3:].strip().strip("\"'") or "linux"
+    return "linux"
+
+
+# "distro" tries the single-file release that already exists (built by `just appimage` in the Arch box) on
+# whatever distribution this is: roomy has to install what it needs here by itself, then pass the quick checks.
+DISTRO = "distro" in sys.argv[1:]
+KIND = f"distro-{distribution()}" if DISTRO else "gui"
+ec.OUT = OUT = ec.DATA / "results" / f"{KIND}-{TS}"
+ec.WORK = WORK = ec.DATA / "scratch" / f"{KIND}-{TS}"
+SINGLE_FILE = ec.REPO / "work" / "dist" / "roomy-x86_64.AppImage"
 os.environ["XDG_CONFIG_HOME"] = str(WORK / "config")
 GUI = ec.REPO / "target" / "release" / "roomy-gui"
 log, sh, roomy, step, expect = ec.log, ec.sh, ec.roomy, ec.step, ec.expect
 # A short run of one group of checks: "quick" (sound, microphone, settings, dialogs) or "desktop" (pointer, clipboard).
-ONLY = next((word for word in sys.argv[1:] if word in ("quick", "desktop")), None)
+# "appimage" builds roomy's single-file release first and runs the quick checks with that file as the `roomy` program.
+APPIMAGE = "appimage" in sys.argv[1:]
+ONLY = next((word for word in sys.argv[1:] if word in ("quick", "desktop")), "quick" if APPIMAGE or DISTRO else None)
 QUICK = ONLY is not None
 
 
@@ -152,6 +174,8 @@ def main_vm(key, key_pub):
         folder, port, created = ec.create_vm("gui-main", key_pub)
         d["create"] = created
         d["library"] = roomy("vm", "list")
+    if not ec.REPORT["steps"][-1]["ok"]:
+        return  # without a VM there is nothing more to try
     guest = ec.Guest(folder, port, key)
 
     # In the desktop run QEMU also writes down what it does with the clipboard (into the VM's qemu.log).
@@ -250,6 +274,16 @@ def main_vm(key, key_pub):
             d["window"] = window.stop()
             expect(d, d["window"]["exit_status"] == 0, "the window did not exit cleanly")
             expect(d, not d["window"]["gtk_complaints"], "the window toolkit printed warnings; see main-window.log")
+        if QUICK:
+            # Closing the window must leave the VM running. This matters most for the single-file release,
+            # whose programs live in a mount that goes away with the process that opened the file.
+            with step("main:vm-outlives-the-window") as d:
+                time.sleep(3)
+                d["status"] = guest.status()
+                d["ssh"] = guest.ssh("echo still-here", timeout=10)["out"].strip()
+                d["supervisor"] = sh("pgrep -af 'supervise .*gui-main' | cut -c1-200")["out"]
+                d["mounts"] = sh("grep -c 'mount_roomy' /proc/mounts")["out"].strip()
+                expect(d, d["status"] == "running" and d["ssh"] == "still-here", "the VM did not keep running after its window closed")
         roomy("vm", "force-off", folder, timeout=20)
 
 
@@ -448,6 +482,8 @@ def gpu_vm(key, key_pub):
     with step("gpu:create") as d:
         folder, port, created = ec.create_vm("gui-gpu", key_pub, ["--gpu"])
         d["create"] = created
+    if not ec.REPORT["steps"][-1]["ok"]:
+        return
     guest = ec.Guest(folder, port, key)
     window = Window("gpu", vm=folder)
     try:
@@ -510,7 +546,7 @@ def main():
     OUT.mkdir(parents=True)
     WORK.mkdir(parents=True)
     ec._log_file = open(OUT / "run.log", "a")
-    latest = ec.HERE / "results" / "latest-gui"
+    latest = ec.DATA / "results" / f"latest-{KIND}"
     with contextlib.suppress(OSError):
         if latest.is_symlink():
             latest.unlink()
@@ -521,6 +557,10 @@ def main():
         if os.environ.get("ROOMY_LAB_SKIP_BUILD") == "1":  # for dry runs of this script itself
             session = run_checks()
             return
+        if DISTRO:
+            if on_this_distribution():
+                session = run_checks()
+            return
         with step("build") as d:
             # The window has only ever been type-checked before this; keep the compiler's whole output.
             r = sh("cargo build --release --workspace > '%s' 2>&1; echo rc=$?" % (OUT / "build.log"), timeout=1800)
@@ -528,6 +568,19 @@ def main():
             d["tail"] = sh(["tail", "-n", "40", str(OUT / "build.log")])["out"]
             expect(d, "rc=0" in d["cargo"] and GUI.is_file(), "the build failed; see build.log")
         build_ok = ec.REPORT["steps"][-1]["ok"]
+        if APPIMAGE and build_ok:
+            with step("appimage") as d:
+                image = ec.REPO / "work" / "dist" / "roomy-x86_64.AppImage"
+                r = sh("just appimage > '%s' 2>&1; echo rc=$?" % (OUT / "appimage.log"), timeout=1800)
+                d["script"] = r["out"].strip()
+                d["tail"] = sh(["tail", "-n", "6", str(OUT / "appimage.log")])["out"]
+                d["bytes"] = image.stat().st_size if image.is_file() else None
+                expect(d, "rc=0" in d["script"] and d["bytes"], "the single file could not be built; see appimage.log")
+                if d["bytes"]:
+                    if not (shutil.which("fusermount3") or shutil.which("fusermount")):
+                        d["helper_installed"] = sh("sudo -n pacman -S --needed --noconfirm fuse3 2>&1 | tail -n 2", timeout=300)["out"]
+                    use_single_file(d, image)
+            build_ok = ec.REPORT["steps"][-1]["ok"]
         if QUICK:
             if build_ok:
                 session = run_checks()
@@ -546,13 +599,51 @@ def main():
         finish(session)
 
 
+def use_single_file(d, image):
+    """From here on `roomy` is the single-file release. Records in `d` how it had to be started."""
+    # The file mounts itself with the system's FUSE helper, as it will on a user's computer.
+    # A box may lack the helper; without it the file can only unpack itself on every start.
+    d["fuse"] = sh("ls -l /dev/fuse 2>&1; command -v fusermount3 fusermount")["out"]
+    ec.ROOMY = image
+    os.environ.pop("APPIMAGE_EXTRACT_AND_RUN", None)
+    first = roomy("--help", timeout=30)
+    d["mounted_run"] = {"rc": first["rc"], "err": first["err"][-400:]}
+    if first["rc"] != 0:
+        os.environ["APPIMAGE_EXTRACT_AND_RUN"] = "1"
+        second = roomy("--help", timeout=30)
+        d["unpacked_run"] = {"rc": second["rc"], "err": second["err"][-400:]}
+        expect(d, second["rc"] == 0, "the single file does not start, mounted or unpacked")
+    d["mode_tested"] = "unpacks itself on every start" if os.environ.get("APPIMAGE_EXTRACT_AND_RUN") else "mounts itself"
+
+
+def on_this_distribution():
+    """The single-file release on a distribution it was not built on, before roomy has installed anything."""
+    with step("distro") as d:
+        d["os_release"] = sh("grep -E '^(ID|ID_LIKE|VERSION_ID|VERSION_CODENAME|VARIANT_ID|PRETTY_NAME)=' /etc/os-release")["out"]
+        d["glibc"] = sh("ldd --version 2>&1 | head -n 1")["out"].strip()
+        d["single_file"] = str(SINGLE_FILE)
+        if not SINGLE_FILE.is_file():
+            raise RuntimeError(f"{SINGLE_FILE} is missing: build it first with 'just appimage' inside the roomy-lab box")
+        d["built"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(SINGLE_FILE.stat().st_mtime))
+        use_single_file(d, SINGLE_FILE)
+        # What the doctor makes of this system as it is, and what setup proposes, before anything is installed.
+        before = roomy("doctor", "--report-file", OUT / "doctor-before.txt")
+        d["doctor_before_rc"] = before["rc"]
+        d["problems_before"] = [line for line in before["out"].splitlines() if line.startswith(("[FAIL]", "[WARN]", "[SKIP]"))][:20]
+        proposed = sh([str(ec.ROOMY), "setup"], timeout=120, input="")
+        (OUT / "setup-proposed.txt").write_text(proposed["out"] + "\n" + proposed["err"])
+        d["proposed"] = [line for line in proposed["out"].splitlines() if line.startswith(("  ", "Note:", "roomy c", "roomy d"))][:12]
+    return ec.REPORT["steps"][-1]["ok"]
+
+
 def run_checks():
     """Everything after the build. Returns the fallback desktop session, if one was started."""
     session = None
     with step("setup") as d:
         # The box may predate packages roomy now needs (the sound library): let roomy install them itself.
-        r = roomy("setup", "--yes", timeout=600)
-        d["rc"], d["tail"] = r["rc"], (r["out"] + "\n" + r["err"])[-1500:]
+        r = roomy("setup", "--yes", timeout=1800)
+        (OUT / "setup.txt").write_text(r["out"] + "\n" + r["err"])
+        d["rc"], d["secs"], d["tail"] = r["rc"], r["secs"], (r["out"] + "\n" + r["err"])[-1500:]
         expect(d, r["rc"] == 0, "roomy setup did not leave this box ready; see its output")
     with step("doctor") as d:
         r = roomy("doctor", "--report-file", OUT / "doctor.txt")
@@ -574,7 +665,7 @@ def run_checks():
         empty_library()
     with step("prepare") as d:
         if not ec.BASE_IMAGE.is_file():
-            raise RuntimeError(f"{ec.BASE_IMAGE} is missing: run ./lab/run.sh once first (it downloads the guest image)")
+            raise RuntimeError(f"{ec.BASE_IMAGE} is missing: run just lab-probe once first (it downloads the guest image)")
         key = str(WORK / "id_ed25519")
         r = sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "roomy-lab", "-f", key])
         if r["rc"] != 0:
@@ -601,7 +692,7 @@ def finish(session):
     ec.REPORT["processes_at_end"] = ec.processes()
     ec.REPORT["finished"] = time.strftime("%Y%m%d-%H%M%S")
     ec.save()
-    lines = [f"roomy window check {TS}", ""]
+    lines = [f"roomy window check {TS}" + (f" on {distribution()}, single-file release" if DISTRO else ""), ""]
     for s in ec.REPORT["steps"]:
         verdict = {True: "ok", False: "FAILED"}.get(s["ok"], "interrupted")
         note = s.get("error") or s["data"].get("why") or ""
@@ -616,7 +707,7 @@ def finish(session):
     if not ec.KEEP:
         shutil.rmtree(WORK, ignore_errors=True)
         with contextlib.suppress(OSError):
-            (ec.HERE / "work").rmdir()
+            (ec.DATA / "scratch").rmdir()
     log(f"done. Everything is in {OUT}")
 
 

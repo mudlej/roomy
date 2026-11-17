@@ -5,8 +5,8 @@ use crate::{Context, create, doctor};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use roomy_core::control::{self, State};
+use roomy_core::library;
 use roomy_core::vm::{Config, Folder};
-use roomy_core::{doctor as checks, library};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
@@ -122,8 +122,8 @@ impl Library {
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("roomy")
-            .default_width(640)
-            .default_height(520)
+            .default_width(960)
+            .default_height(720)
             .content(&toolbar)
             .build();
 
@@ -181,11 +181,17 @@ impl Library {
         let env = self.context.env.clone();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let report = gio::spawn_blocking(move || checks::run(&env)).await;
+            let report = gio::spawn_blocking(move || doctor::examine(&env)).await;
             let (Some(this), Ok(report)) = (weak.upgrade(), report) else { return };
             this.doctor_verdict.replace(Some(report.verdict()));
             if always_show || !report.can_run_vms() {
-                doctor::show(&this.window, &report);
+                // The dialog checks again after installing packages.
+                let weak = Rc::downgrade(&this);
+                doctor::show(&this.context, &this.window, &report, move |report| {
+                    if let Some(this) = weak.upgrade() {
+                        this.doctor_verdict.replace(Some(report.verdict()));
+                    }
+                });
             }
         });
     }

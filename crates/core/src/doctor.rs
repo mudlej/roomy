@@ -5,7 +5,7 @@
 //! roomy uses, so "ok" means the feature works here and a failure carries
 //! QEMU's own error message.
 
-use crate::env::Env;
+use crate::env::{Env, roomy_command};
 use crate::host::{self, CpuVirtualization, Firmware, KvmAccess, Version};
 use crate::process::{KillOnDrop, read_tail, run_capture, spawn_logged, wait_until, wait_with_limit};
 use crate::qmp::Qmp;
@@ -48,17 +48,27 @@ pub struct Check {
     pub summary: String,
     /// What the user can do about it, when there is something to do.
     pub fix: Option<String>,
+    /// Installing roomy's packages (`roomy setup`) is that something.
+    pub setup_helps: bool,
     /// Raw output from the failing program, for the report.
     pub log: Option<String>,
 }
 
 impl Check {
     fn new(id: &'static str, title: &'static str, status: Status, summary: impl Into<String>) -> Check {
-        Check { id, title, status, summary: summary.into(), fix: None, log: None }
+        Check { id, title, status, summary: summary.into(), fix: None, setup_helps: false, log: None }
     }
 
     fn fix(mut self, fix: impl Into<String>) -> Check {
         self.fix = Some(fix.into());
+        self
+    }
+
+    /// The fix is to install packages: `lead` says which or why, and the command to run follows.
+    fn fix_by_setup(mut self, lead: &str) -> Check {
+        let run = format!("Run: {} setup", roomy_command());
+        self.fix = Some(if lead.is_empty() { run } else { format!("{lead} {run}") });
+        self.setup_helps = true;
         self
     }
 
@@ -82,6 +92,11 @@ pub struct Report {
 impl Report {
     pub fn count(&self, status: Status) -> usize {
         self.checks.iter().filter(|c| c.status == status).count()
+    }
+
+    /// True when installing roomy's packages is the fix for something found here.
+    pub fn setup_helps(&self) -> bool {
+        self.checks.iter().any(|c| c.setup_helps)
     }
 
     /// True when nothing prevents roomy from running virtual machines.
@@ -185,14 +200,23 @@ pub fn run(env: &Env) -> Report {
             let started = start.status == Status::Ok;
             checks.push(start);
             if started {
-                checks.push(check_devices(&trial));
+                let devices = check_devices(&trial);
+                let display_works = devices.status == Status::Ok;
+                checks.push(devices);
                 checks.push(check_firmware(&trial, firmware.as_ref()));
                 checks.push(check_shared_folders(&trial, virtiofsd.as_deref()));
                 let render_node = env.render_node.clone().or_else(|| host::display_gpu(env).map(|gpu| gpu.render_node));
                 if let Some(node) = &render_node {
                     facts.push(("Graphics card for VMs", node.display().to_string()));
                 }
-                checks.push(check_gpu(&trial, render_node.as_deref()));
+                // Accelerated graphics go through the same display: without it there is nothing to learn here,
+                // and QEMU's complaint would only be the one already reported.
+                checks.push(if display_works {
+                    check_gpu(&trial, render_node.as_deref())
+                } else {
+                    let (id, title) = TRIAL_CHECKS[3];
+                    Check::new(id, title, Status::Skipped, "not checked: the display has to work first (see above)")
+                });
             } else {
                 checks.extend(skipped_trials("starting a virtual machine failed"));
             }
@@ -241,7 +265,7 @@ pub fn check_window(program: Option<&Path>) -> Check {
     match run_capture(program, &["--probe"], Duration::from_secs(15)) {
         Ok(out) if out.status.success() => Check::new("window", TITLE, Status::Ok, "the window can start"),
         Ok(out) => Check::new("window", TITLE, Status::Warning, "the window cannot start on this computer")
-            .fix("Install GTK 4 (4.14 or newer) and libadwaita (1.5 or newer), for example with: roomy setup")
+            .fix_by_setup("Install GTK 4 (4.14 or newer) and libadwaita (1.5 or newer).")
             .log(format!("{}{}", out.stdout, out.stderr)),
         Err(e) => Check::new("window", TITLE, Status::Warning, format!("{} could not be run: {e}", program.display()))
             .fix("Reinstall roomy; virtual machines can still be used with 'roomy vm' commands meanwhile."),
@@ -269,7 +293,7 @@ pub fn check_sound() -> Check {
             Status::Warning,
             "the sound library (libpulse) is not installed; virtual machines will be silent",
         )
-        .fix("Install the PulseAudio client library (libpulse), for example with: roomy setup")
+        .fix_by_setup("Install the PulseAudio client library (libpulse).")
     }
 }
 
@@ -279,6 +303,22 @@ const TRIAL_CHECKS: [(&str, &str); 4] = [
     ("shared-folders", "Shared folders"),
     ("gpu", "GPU acceleration"),
 ];
+
+/// The part of QEMU its refusal says is not installed. Distributions package QEMU's displays,
+/// sound outputs and devices separately, and QEMU names the first one it misses.
+fn missing_piece(log: &str) -> Option<String> {
+    if log.contains("Display 'dbus' is not available") {
+        return Some("its D-Bus display module, which roomy shows the screen through".to_owned());
+    }
+    if log.contains("audio driver") && log.contains("dbus") {
+        return Some("its D-Bus audio module, which roomy plays sound through".to_owned());
+    }
+    let device = log.lines().find_map(|line| {
+        let before = line.strip_suffix("' is not a valid device model name")?;
+        before.rsplit_once('\'').map(|(_, name)| name)
+    })?;
+    Some(format!("the '{device}' device"))
+}
 
 fn skipped_trials(why: &str) -> Vec<Check> {
     TRIAL_CHECKS
@@ -322,7 +362,7 @@ fn check_qemu(env: &Env) -> (Check, Option<(PathBuf, Version)>) {
     const TITLE: &str = "QEMU";
     let Some(path) = env.find_program(host::QEMU_PROGRAM) else {
         let check = Check::new("qemu", TITLE, Status::Failed, format!("{} is not installed", host::QEMU_PROGRAM))
-            .fix("Run: roomy setup");
+            .fix_by_setup("");
         return (check, None);
     };
     match host::tool_version(&path) {
@@ -349,7 +389,7 @@ fn check_qemu_img(env: &Env) -> Check {
     const TITLE: &str = "Disk image tool";
     match env.find_program("qemu-img") {
         Some(path) => Check::new("qemu-img", TITLE, Status::Ok, format!("qemu-img found at {}", path.display())),
-        None => Check::new("qemu-img", TITLE, Status::Failed, "qemu-img is not installed").fix("Run: roomy setup"),
+        None => Check::new("qemu-img", TITLE, Status::Failed, "qemu-img is not installed").fix_by_setup(""),
     }
 }
 
@@ -403,9 +443,13 @@ fn check_devices(trial: &Trial) -> Check {
     );
     if outcome.started {
         Check::new(id, title, Status::Ok, "QEMU accepts roomy's display, audio and clipboard configuration")
+    } else if let Some(piece) = missing_piece(&outcome.log) {
+        Check::new(id, title, Status::Failed, format!("QEMU is installed without {piece}"))
+            .fix_by_setup("That is a package of its own on this system.")
+            .log(outcome.log)
     } else {
         Check::new(id, title, Status::Failed, "QEMU rejected roomy's display, audio or clipboard configuration")
-            .fix("QEMU's D-Bus display and audio modules or its virtio graphics devices are probably missing. Run: roomy setup")
+            .fix_by_setup("QEMU's D-Bus display and audio modules or its virtio graphics devices are probably missing.")
             .log(outcome.log)
     }
 }
@@ -414,7 +458,7 @@ fn check_firmware(trial: &Trial, firmware: Option<&Firmware>) -> Check {
     let (id, title) = TRIAL_CHECKS[1];
     let Some(firmware) = firmware else {
         return Check::new(id, title, Status::Failed, "no UEFI firmware for virtual machines was found")
-            .fix("Install the OVMF / edk2 firmware package for x86-64. Run: roomy setup");
+            .fix_by_setup("Install the OVMF / edk2 firmware package for x86-64.");
     };
     let vars = trial.scratch.dir.join("firmware-vars");
     if let Err(e) = fs::copy(&firmware.vars_template, &vars) {
@@ -435,7 +479,7 @@ fn check_shared_folders(trial: &Trial, virtiofsd: Option<&Path>) -> Check {
     let (id, title) = TRIAL_CHECKS[2];
     let Some(virtiofsd) = virtiofsd else {
         return Check::new(id, title, Status::Warning, "virtiofsd is not installed; shared folders are unavailable")
-            .fix("Run: roomy setup");
+            .fix_by_setup("");
     };
     let unavailable = |what: &str, log: String| {
         Check::new(id, title, Status::Warning, format!("{what}; shared folders are unavailable")).log(log)
@@ -481,10 +525,23 @@ fn check_gpu(trial: &Trial, render_node: Option<&Path>) -> Check {
     let outcome = trial.run("gpu", &["-display", &display, "-device", "virtio-vga-gl"], &[]);
     if outcome.started {
         Check::new(id, title, Status::Ok, "QEMU can render with this computer's graphics driver")
-    } else {
-        Check::new(id, title, Status::Warning, "QEMU could not set up accelerated graphics; the GPU acceleration switch will be unavailable")
-            .fix("Virtual machines still work without it. Check that your graphics driver and QEMU's OpenGL modules are installed (run: roomy setup).")
+    } else if let Some(piece) = missing_piece(&outcome.log) {
+        let summary = format!("QEMU is installed without {piece}; the GPU acceleration switch will be unavailable");
+        Check::new(id, title, Status::Warning, summary)
+            .fix_by_setup("Virtual machines still work without it. To get it:")
             .log(outcome.log)
+    } else {
+        Check::new(
+            id,
+            title,
+            Status::Warning,
+            "QEMU could not set up accelerated graphics; the GPU acceleration switch will be unavailable",
+        )
+        .fix_by_setup(
+            "Virtual machines still work without it. Check that your graphics driver and QEMU's OpenGL modules are \
+             installed.",
+        )
+        .log(outcome.log)
     }
 }
 

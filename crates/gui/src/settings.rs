@@ -1,31 +1,15 @@
 //! The settings dialog of one VM. Every group says when its changes take effect.
 
 use crate::Context;
+use crate::fields::{Amount, Holder, PortForwards, SHARED_FOLDERS_IN_THE_GUEST, SharedFolders};
 use crate::machine::SUSPEND_UNAVAILABLE_WITH_GPU;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use roomy_core::control::{self, State};
+use roomy_core::host;
 use roomy_core::settings::{self, Applied, Applies, Changes};
-use roomy_core::vm::{Config, Folder, PortForward, SharedFolder};
-use std::cell::RefCell;
-use std::path::Path;
+use roomy_core::vm::{Config, Folder};
 use std::rc::Rc;
-
-/// A name the guest can mount `folder` by: its last component, reduced to
-/// letters, digits, '-' and '_', and different from the names already taken.
-fn share_name(folder: &Path, taken: &[SharedFolder]) -> String {
-    let raw = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut base: String =
-        raw.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).take(30).collect();
-    if base.trim_matches('-').is_empty() {
-        base = "shared".to_owned();
-    }
-    let free = |name: &str| !taken.iter().any(|share| share.name == name);
-    if free(&base) {
-        return base;
-    }
-    (2..).map(|n| format!("{base}-{n}")).find(|name| free(name)).unwrap_or(base)
-}
 
 /// One sentence for the user about what was changed and when it takes effect.
 pub fn summary(applied: &[Applied]) -> String {
@@ -50,41 +34,6 @@ pub fn summary(applied: &[Applied]) -> String {
     parts.join(" ")
 }
 
-/// A list of removable rows inside a group, backed by a vector.
-fn rebuild<T: Clone + 'static>(
-    group: &adw::PreferencesGroup,
-    rows: &Rc<RefCell<Vec<adw::ActionRow>>>,
-    items: &Rc<RefCell<Vec<T>>>,
-    describe: fn(&T) -> (String, String),
-) {
-    for row in rows.borrow_mut().drain(..) {
-        group.remove(&row);
-    }
-    for (index, item) in items.borrow().iter().enumerate() {
-        let (title, subtitle) = describe(item);
-        let row = crate::plain_row(&title, &subtitle);
-        row.set_subtitle_lines(1);
-        let remove = gtk::Button::builder()
-            .icon_name("list-remove-symbolic")
-            .valign(gtk::Align::Center)
-            .tooltip_text("Remove")
-            .build();
-        remove.add_css_class("flat");
-        remove.connect_clicked({
-            let (group, rows, items) = (group.clone(), rows.clone(), items.clone());
-            move |_| {
-                if index < items.borrow().len() {
-                    items.borrow_mut().remove(index);
-                }
-                rebuild(&group, &rows, &items, describe);
-            }
-        });
-        row.add_suffix(&remove);
-        group.add(&row);
-        rows.borrow_mut().push(row);
-    }
-}
-
 /// Opens the dialog for the VM in `folder`. `done` is called with the summary once changes were saved.
 pub fn show(context: &Rc<Context>, parent: &impl IsA<gtk::Widget>, folder: &Folder, done: impl Fn(String) + 'static) {
     let (env, for_load) = (context.env.clone(), folder.clone());
@@ -95,11 +44,14 @@ pub fn show(context: &Rc<Context>, parent: &impl IsA<gtk::Widget>, folder: &Fold
         let loaded = gio::spawn_blocking(move || {
             let config = for_load.load().map_err(|e| e.to_string())?;
             let disk = settings::disk_gb(&env, &for_load, &config).map_err(|e| e.to_string())?;
-            Ok::<_, String>((config, disk, control::status(&env, &for_load)))
+            let free = host::free_space_gb(for_load.dir());
+            Ok::<_, String>((config, disk, free, control::status(&env, &for_load)))
         })
         .await;
         match loaded {
-            Ok(Ok((config, disk_gb, state))) => build(&context, &parent, &folder, config, disk_gb, state, done),
+            Ok(Ok((config, disk_gb, free_gb, state))) => {
+                build(&context, &parent, &folder, config, (disk_gb, free_gb), state, done)
+            }
             Ok(Err(problem)) => {
                 let dialog = adw::AlertDialog::new(Some("The settings could not be opened"), Some(&problem));
                 dialog.add_responses(&[("close", "Close")]);
@@ -115,11 +67,12 @@ fn build(
     parent: &gtk::Widget,
     folder: &Folder,
     config: Config,
-    disk_gb: u64,
+    (disk_gb, free_gb): (u64, Option<u64>),
     state: State,
     done: Rc<dyn Fn(String)>,
 ) {
     let host_cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
+    let host_memory_gb = (host::memory_mb(&context.env).unwrap_or(8192) / 1024).max(1);
     let off = state == State::Off;
     let later = if off {
         "Used the next time the virtual machine starts."
@@ -143,10 +96,14 @@ fn build(
         .subtitle("Let the guest hear this computer's microphone")
         .active(config.features.microphone)
         .build();
-    let disk = adw::SpinRow::with_range(disk_gb as f64, 16384.0, 8.0);
-    disk.set_title("Disk (GB)");
-    disk.set_subtitle("Can only grow. Afterwards the guest has to grow its own partition to use the space.");
+    // A disk only grows, and by no more than there is room for where it is kept.
+    let disk =
+        Amount::new("Disk (GB)", disk_gb as f64, free_gb.map_or(16384.0, |free| (disk_gb + free) as f64), 1.0, 0);
     disk.set_value(disk_gb as f64);
+    let room = free_gb.map(|free| format!(" {free} GB are free where it is kept.")).unwrap_or_default();
+    disk.set_note(&format!(
+        "Can only grow.{room} Afterwards the guest has to grow its own partition to use the space."
+    ));
     disk.set_sensitive(state != State::Suspended);
     let immediate = adw::PreferencesGroup::builder().title("Takes effect immediately").build();
     for row in [
@@ -154,62 +111,39 @@ fn build(
         network.upcast_ref(),
         clipboard.upcast_ref(),
         microphone.upcast_ref(),
-        disk.upcast_ref(),
+        disk.row.upcast_ref(),
     ] {
         immediate.add(row);
     }
 
-    let cpus = adw::SpinRow::with_range(1.0, f64::from(host_cpus.max(config.cpus)), 1.0);
-    cpus.set_title("Processors");
+    let cpus = Amount::new("Processors", 1.0, f64::from(host_cpus.max(config.cpus)), 1.0, 0);
     cpus.set_value(f64::from(config.cpus));
-    let memory = adw::SpinRow::with_range(256.0, 1_048_576.0, 256.0);
-    memory.set_title("Memory (MB)");
-    memory.set_value(config.memory_mb as f64);
+    cpus.set_note(&format!("This computer has {host_cpus}"));
+    let memory_gb = config.memory_mb as f64 / 1024.0;
+    let memory = Amount::new("Memory (GB)", 0.5, (host_memory_gb as f64).max(memory_gb.ceil()), 0.5, 1);
+    memory.set_value(memory_gb);
+    // The slider moves in half GBs. A size that is not one is kept as it is unless the slider is moved.
+    let memory_as_shown = memory.value();
+    let exactly = if memory_as_shown == memory_gb { String::new() } else { format!(" Now {} MB.", config.memory_mb) };
+    memory.set_note(&format!("This computer has {host_memory_gb} GB.{exactly}"));
     let gpu = adw::SwitchRow::builder()
         .title("GPU acceleration")
         .subtitle(SUSPEND_UNAVAILABLE_WITH_GPU)
         .active(config.features.gpu_acceleration)
         .build();
     let hardware = adw::PreferencesGroup::builder().title("Hardware").description(later).build();
-    hardware.add(&cpus);
-    hardware.add(&memory);
+    hardware.add(&cpus.row);
+    hardware.add(&memory.row);
     hardware.add(&gpu);
 
-    let shares = Rc::new(RefCell::new(config.shared_folders.clone()));
-    let share_rows = Rc::new(RefCell::new(Vec::new()));
-    let describe_share: fn(&SharedFolder) -> (String, String) =
-        |share| (share.name.clone(), share.path.display().to_string());
-    let add_share = gtk::Button::builder()
-        .icon_name("list-add-symbolic")
-        .valign(gtk::Align::Center)
-        .tooltip_text("Share a folder")
-        .build();
-    add_share.add_css_class("flat");
-    let shared = adw::PreferencesGroup::builder()
-        .title("Shared folders")
-        .description(format!("{later} See Guest Setup for how to open them inside the guest."))
-        .header_suffix(&add_share)
-        .build();
-    rebuild(&shared, &share_rows, &shares, describe_share);
-
-    let forwards = Rc::new(RefCell::new(config.port_forwards.clone()));
-    let forward_rows = Rc::new(RefCell::new(Vec::new()));
-    let describe_forward: fn(&PortForward) -> (String, String) = |forward| {
-        (format!("Port {} of this computer", forward.host), format!("reaches port {} of the guest", forward.guest))
-    };
-    let new_forward = adw::EntryRow::builder()
-        .title("Add: this computer's port, a colon, the guest's port (2222:22)")
-        .show_apply_button(true)
-        .build();
+    let shared = SharedFolders::new(config.shared_folders.clone(), &format!("{later} {SHARED_FOLDERS_IN_THE_GUEST}"));
     let forwarded = adw::PreferencesGroup::builder()
         .title("Forwarded ports")
         .description(format!("Reachable from this computer only. {later}"))
         .build();
-    forwarded.add(&new_forward);
-    rebuild(&forwarded, &forward_rows, &forwards, describe_forward);
 
     let page = adw::PreferencesPage::new();
-    for group in [&immediate, &hardware, &shared, &forwarded] {
+    for group in [&immediate, &hardware, &shared.group, &forwarded] {
         page.add(group);
     }
     let cancel = gtk::Button::with_label("Cancel");
@@ -244,42 +178,7 @@ fn build(
             dialog.close();
         }
     });
-    add_share.connect_clicked({
-        let (shared, share_rows, shares, dialog) = (shared.clone(), share_rows.clone(), shares.clone(), dialog.clone());
-        move |_| {
-            let chooser = gtk::FileDialog::builder().title("Choose a Folder to Share").build();
-            let (shared, share_rows, shares) = (shared.clone(), share_rows.clone(), shares.clone());
-            let window = dialog.root().and_downcast::<gtk::Window>();
-            chooser.select_folder(window.as_ref(), gio::Cancellable::NONE, move |chosen| {
-                let Some(path) = chosen.ok().and_then(|file| file.path()) else { return };
-                if shares.borrow().iter().any(|share| share.path == path) {
-                    return;
-                }
-                let name = share_name(&path, &shares.borrow());
-                shares.borrow_mut().push(SharedFolder { name, path });
-                rebuild(&shared, &share_rows, &shares, describe_share);
-            });
-        }
-    });
-    new_forward.connect_apply({
-        let (forwarded, forward_rows, forwards, complain) =
-            (forwarded.clone(), forward_rows.clone(), forwards.clone(), complain.clone());
-        move |entry| {
-            let text = entry.text();
-            let ports = text
-                .split_once(':')
-                .and_then(|(host, guest)| Some((host.trim().parse::<u16>().ok()?, guest.trim().parse::<u16>().ok()?)));
-            match ports {
-                Some((host, guest)) if host != 0 && guest != 0 => {
-                    forwards.borrow_mut().retain(|forward| forward.host != host);
-                    forwards.borrow_mut().push(PortForward { host, guest });
-                    rebuild(&forwarded, &forward_rows, &forwards, describe_forward);
-                    entry.set_text("");
-                }
-                _ => complain("Write two port numbers with a colon between them, for example 2222:22"),
-            }
-        }
-    });
+    let forwards = PortForwards::new(Holder::Group(forwarded.clone()), config.port_forwards.clone(), complain.clone());
 
     apply.connect_clicked({
         let (context, folder, dialog) = (context.clone(), folder.clone(), dialog.clone());
@@ -287,13 +186,17 @@ fn build(
             let changes = Changes {
                 name: Some(name.text().to_string()),
                 cpus: Some(cpus.value() as u32),
-                memory_mb: Some(memory.value() as u64),
+                memory_mb: Some(if memory.value() == memory_as_shown {
+                    config.memory_mb
+                } else {
+                    (memory.value() * 1024.0).round() as u64
+                }),
                 gpu_acceleration: Some(gpu.is_active()),
                 network: Some(network.is_active()),
                 clipboard: Some(clipboard.is_active()),
                 microphone: Some(microphone.is_active()),
-                shared_folders: Some(shares.borrow().clone()),
-                port_forwards: Some(forwards.borrow().clone()),
+                shared_folders: Some(shared.get()),
+                port_forwards: Some(forwards.get()),
                 disk_gb: Some(disk.value() as u64),
             };
             let (env, folder) = (context.env.clone(), folder.clone());

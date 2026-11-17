@@ -4,10 +4,10 @@
 Builds roomy, creates a VM from the cached Arch cloud image, and walks it
 through its lifecycle (start, shared folder, pause, suspend, continue,
 restart, shut down, force off, plus a GPU-accelerated VM and a killed
-supervisor). Everything observed is written to lab/results/engine-<time>/.
+supervisor). Everything observed is written to work/lab/results/engine-<time>/.
 
-Usage: ./lab/engine-check.sh        (about 6 minutes)
-Set ROOMY_LAB_KEEP=1 to keep the test VMs in lab/work/ afterwards.
+Usage: just lab-engine        (about 6 minutes)
+Set ROOMY_LAB_KEEP=1 to keep the test VMs in work/lab/scratch/ afterwards.
 """
 import contextlib
 import json
@@ -22,10 +22,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
+# Everything a run downloads or writes lives under the checkout's work/ folder, which git ignores.
+DATA = REPO / "work" / "lab"
 TS = time.strftime("%Y%m%d-%H%M%S")
-OUT = HERE / "results" / f"engine-{TS}"
-WORK = HERE / "work" / f"engine-{TS}"
-BASE_IMAGE = Path(os.environ.get("ROOMY_LAB_IMAGE") or HERE / "cache" / "Arch-Linux-x86_64-cloudimg.qcow2")
+OUT = DATA / "results" / f"engine-{TS}"
+WORK = DATA / "scratch" / f"engine-{TS}"
+BASE_IMAGE = Path(os.environ.get("ROOMY_LAB_IMAGE") or DATA / "cache" / "Arch-Linux-x86_64-cloudimg.qcow2")
 # ROOMY_LAB_PROGRAM: another build of roomy, for dry runs of these scripts.
 ROOMY = Path(os.environ.get("ROOMY_LAB_PROGRAM") or REPO / "target" / "release" / "roomy")
 KEEP = os.environ.get("ROOMY_LAB_KEEP") == "1"
@@ -238,7 +240,15 @@ def main_vm_checks(key, key_pub):
         return
 
     with step("main:shared-folder") as d:
-        d["mount"] = vm.g("sudo mkdir -p /mnt/labshare && sudo mount -t virtiofs labshare /mnt/labshare && ls -lan /mnt/labshare")
+        # The guest is told about the folder through the firmware tables and mounts it by itself.
+        d["systemd"] = vm.g("systemctl --version | head -n 1")
+        d["mounted_by_itself"] = vm.g("findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/labshare || echo not-mounted")
+        d["told_to_mount"] = vm.g("sudo cat /run/credentials/@system/fstab.extra 2>&1 | head -n 5")
+        expect(d, "virtiofs" in d["mounted_by_itself"],
+               "the guest did not mount the shared folder by itself; see systemd's version and what it was told")
+        if "virtiofs" not in d["mounted_by_itself"]:
+            d["mount"] = vm.g("sudo mkdir -p /mnt/labshare && sudo mount -t virtiofs labshare /mnt/labshare")
+        d["listing"] = vm.g("ls -lan /mnt/labshare")
         d["guest_write"] = vm.g("echo from-guest > /mnt/labshare/from-guest.txt && cat /mnt/labshare/from-host.txt")
         d["host_view"] = sh(["ls", "-lan", str(share_dir)])["out"]
         expect(d, (share_dir / "from-guest.txt").is_file() and "written on the host" in d["guest_write"],
@@ -371,7 +381,7 @@ def main():
     OUT.mkdir(parents=True)
     WORK.mkdir(parents=True)
     _log_file = open(OUT / "run.log", "a")
-    latest = HERE / "results" / "latest-engine"
+    latest = DATA / "results" / "latest-engine"
     with contextlib.suppress(OSError):
         if latest.is_symlink():
             latest.unlink()
@@ -390,7 +400,7 @@ def main():
             return
         with step("prepare") as d:
             if not BASE_IMAGE.is_file():
-                raise RuntimeError(f"{BASE_IMAGE} is missing: run ./lab/run.sh once first (it downloads the guest image)")
+                raise RuntimeError(f"{BASE_IMAGE} is missing: run just lab-probe once first (it downloads the guest image)")
             key = str(WORK / "id_ed25519")
             r = sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "roomy-lab", "-f", key])
             if r["rc"] != 0:
@@ -425,7 +435,7 @@ def main():
         if not KEEP:
             shutil.rmtree(WORK, ignore_errors=True)
             with contextlib.suppress(OSError):
-                (HERE / "work").rmdir()
+                (DATA / "scratch").rmdir()
         log(f"done. Everything is in {OUT}")
 
 
