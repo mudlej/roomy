@@ -2,12 +2,13 @@
 //! directory. Then the window keeps a `facts.json` there describing what it
 //! shows, and obeys these files a test script may drop into it:
 //!
-//!   shot   contains a name: save pictures `<name>-library.png` and `<name>-vm.png`
-//!   type   contains text: type it into the VM
-//!   action contains the name of a VM window action to carry out (`settings`, `guest-setup`, ...)
-//!   pointer   contains `<across> <down>` as fractions of the screen, then optionally `click`: point there
-//!   clipboard contains text: offer it to the guest as this computer's clipboard
-//!   stop   quit
+//!   shot       contains a name: save pictures `<name>-library.png` and `<name>-vm.png`
+//!   type       contains text: type it into the VM
+//!   action     contains the name of a VM window action to carry out (`settings`, `guest-setup`, ...),
+//!              or `close-dialog`
+//!   pointer    contains `<across> <down>` as fractions of the screen, then optionally `click`: point there
+//!   clipboard  contains text: offer it to the guest as this computer's clipboard
+//!   stop       quit
 //!
 //! Each file is removed once obeyed. Also read at startup:
 //!
@@ -15,8 +16,8 @@
 //!   ROOMY_GUI_LAB_SECONDS=<n>    quit after this long regardless (default 900)
 
 use crate::library::Library;
+use adw::prelude::*;
 use gtk::glib;
-use gtk::prelude::*;
 use roomy_core::control::State;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -120,14 +121,14 @@ pub fn run(app: &adw::Application, library: &Rc<Library>, dir: PathBuf) {
                     shots.insert(name.clone(), json!({ "bright_area": bright_area(machine.screen()) }));
                 }
             }
-            // The name of a window action to carry out, such as `settings` or `guest-setup`.
             if let (Some(action), Some(machine)) = (take("action"), &machine) {
                 if action == "close-dialog" {
-                    if let Some(dialog) = adw::prelude::AdwApplicationWindowExt::visible_dialog(machine.window()) {
-                        adw::prelude::AdwDialogExt::force_close(&dialog);
+                    if let Some(dialog) = machine.window().visible_dialog() {
+                        dialog.force_close();
                     }
                 } else {
-                    gtk::prelude::ActionGroupExt::activate_action(machine.window(), &action, None);
+                    // Spelled out: a window is also a widget, whose `activate_action` works differently.
+                    ActionGroupExt::activate_action(machine.window(), &action, None);
                 }
             }
             if let (Some(place), Some(machine)) = (take("pointer"), &machine) {

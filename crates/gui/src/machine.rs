@@ -18,7 +18,7 @@ use roomy_display::{Button, Display, Dmabuf, Event, Options, clipboard, keymap};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::os::fd::AsRawFd;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,6 @@ const FULLSCREEN_HINT: &str = "Press Ctrl+Alt+Enter to leave fullscreen";
 /// What a menu entry does.
 type MenuAction = Box<dyn Fn(&Rc<Machine>)>;
 
-/// What the screen widget is currently fed from.
 /// What one look at the VM's folder and supervisor found.
 struct Polled {
     state: State,
@@ -40,6 +39,7 @@ struct Polled {
     waiting: Vec<&'static str>,
 }
 
+/// What the screen widget is currently fed from.
 enum Source {
     Nothing,
     /// Pixels kept in `canvas` (sent inline, or copied out of shared memory).
@@ -108,18 +108,6 @@ pub struct Machine {
     /// How the guest described its graphics-memory picture.
     pub screen_detail: RefCell<String>,
     pub problems: RefCell<Vec<String>>,
-}
-
-/// Wraps a method so the closure holds the window only weakly.
-macro_rules! on {
-    ($machine:expr, |$this:ident $(, $arg:pat_param)*| $body:expr) => {{
-        let weak: Weak<Machine> = Rc::downgrade($machine);
-        move |$($arg),*| {
-            if let Some($this) = weak.upgrade() {
-                $body
-            }
-        }
-    }};
 }
 
 impl Machine {
@@ -280,7 +268,7 @@ impl Machine {
             "banner": if self.banner.is_revealed() { Some(self.banner.title().to_string()) } else { None },
             "waiting_for_next_boot": self.waiting.borrow().clone(),
             "other_graphics_card": self.other_card.get(),
-                        "guest_agent": self.guest_agent.get(),
+            "guest_agent": self.guest_agent.get(),
             "pointer_absolute": self.pointer_absolute.get(),
             "pointed_at": self.lab_pointed_at.get(),
             "guest_copied": self.lab_guest_copied.borrow().clone(),
@@ -292,8 +280,6 @@ impl Machine {
     pub fn screen(&self) -> &Screen {
         &self.screen
     }
-
-    // ---- power controls -------------------------------------------------------------------
 
     fn wire_controls(self: &Rc<Self>) {
         self.start_button.connect_clicked(on!(self, |this, _| this.start()));
@@ -353,65 +339,49 @@ impl Machine {
         add(
             "force-off",
             Box::new(|this| {
-                this.confirm(
+                crate::confirm(
+                    &this.window,
                     "Force this virtual machine off?",
                     "This is like pulling the plug: anything not saved inside the virtual machine is lost.",
                     "Force Off",
-                    |this| this.request(Request::ForceOff, "Stopping…"),
+                    on!(this, |this| this.request(Request::ForceOff, "Stopping…")),
                 )
             }),
         );
         add(
             "force-restart",
             Box::new(|this| {
-                this.confirm(
+                crate::confirm(
+                    &this.window,
                     "Force this virtual machine to restart?",
                     "This is like pressing a reset button: anything not saved inside the virtual machine is lost.",
                     "Force Restart",
-                    |this| this.request(Request::ForceRestart, "Restarting…"),
+                    on!(this, |this| this.request(Request::ForceRestart, "Restarting…")),
                 )
             }),
         );
         add(
             "discard-state",
             Box::new(|this| {
-                this.confirm(
+                crate::confirm(
+                    &this.window,
                     "Discard the saved state?",
                     "The virtual machine will start fresh instead of continuing where it was suspended. Anything that was not saved inside it is lost.",
                     "Discard",
-                    |this| {
+                    on!(this, |this| {
                         if let Err(e) = this.folder.discard_saved_state() {
                             this.tell(&e.to_string());
                         }
                         this.poll();
-                    },
+                    }),
                 )
             }),
         );
     }
 
-    fn confirm(self: &Rc<Self>, heading: &str, body: &str, go: &str, then: impl Fn(&Rc<Machine>) + 'static) {
-        let dialog = adw::AlertDialog::new(Some(heading), Some(body));
-        dialog.add_responses(&[("cancel", "Cancel"), ("go", go)]);
-        dialog.set_response_appearance("go", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
-        dialog.connect_response(
-            None,
-            on!(self, |this, _, response| {
-                if response == "go" {
-                    then(&this)
-                }
-            }),
-        );
-        dialog.present(Some(&self.window));
-    }
-
     /// Shows a short message at the bottom of the window.
     pub fn tell(&self, message: &str) {
-        // Messages carry paths and other programs' words: shown as they are, never read as markup.
-        let toast = adw::Toast::builder().use_markup(false).title(message).timeout(8).build();
-        self.toasts.add_toast(toast);
+        crate::toast(&self.toasts, message, 8);
     }
 
     /// Sends a power request to the VM's supervisor without blocking the window.
@@ -461,26 +431,13 @@ impl Machine {
             this.activity.set(None);
             match outcome {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => this.show_error("The virtual machine could not be started", &e),
+                Ok(Err(e)) => {
+                    crate::show_copyable(&this.window, "The virtual machine could not be started", &e, "Copy Message")
+                }
                 Err(_) => this.tell("roomy ran into an internal error starting the virtual machine"),
             }
             this.poll();
         });
-    }
-
-    /// An error with details worth reading and copying, e.g. QEMU's own message.
-    fn show_error(&self, heading: &str, details: &str) {
-        let dialog = adw::AlertDialog::new(Some(heading), Some(details));
-        dialog.add_responses(&[("copy", "Copy Message"), ("close", "Close")]);
-        dialog.set_default_response(Some("close"));
-        dialog.set_close_response("close");
-        let (window, text) = (self.window.clone(), details.to_owned());
-        dialog.connect_response(None, move |_, response| {
-            if response == "copy" {
-                window.clipboard().set_text(&text);
-            }
-        });
-        dialog.present(Some(&self.window));
     }
 
     /// Asks the supervisor for the current state, off the window's thread.
@@ -557,15 +514,7 @@ impl Machine {
     fn refresh(&self) {
         let state = self.state.get();
         let busy = self.activity.get().is_some();
-        self.title.set_subtitle(self.activity.get().unwrap_or(match state {
-            State::Off => "Off",
-            State::Suspended => "Suspended",
-            State::Starting => "Starting…",
-            State::Running => "Running",
-            State::Paused => "Paused",
-            State::Suspending => "Suspending…",
-            State::Stopping => "Shutting down…",
-        }));
+        self.title.set_subtitle(self.activity.get().unwrap_or(crate::state_words(state)));
 
         let alive = matches!(state, State::Running | State::Paused | State::Stopping);
         for button in [&self.pause_button, &self.suspend_button, &self.shutdown_button] {
@@ -637,8 +586,6 @@ impl Machine {
         self.start_button.set_label(if state == State::Suspended { "Continue" } else { "Start" });
         self.start_button.set_visible(can_start && !busy);
     }
-
-    // ---- screen ---------------------------------------------------------------------------
 
     fn connect_display(self: &Rc<Self>) {
         // One attempt at a time, and not in a tight loop if QEMU keeps refusing.
@@ -783,7 +730,7 @@ impl Machine {
                     dmabuf.height,
                     dmabuf.stride,
                     dmabuf.modifier,
-                    if dmabuf.stored_bottom_up() { "bottom" } else { "top" }
+                    if dmabuf.stored_bottom_up { "bottom" } else { "top" }
                 ));
                 self.canvas.replace(Canvas::default());
                 self.source.replace(Source::Graphics(dmabuf));
@@ -874,7 +821,7 @@ impl Machine {
                 Ok((texture.upcast(), false))
             }
             Source::Graphics(dmabuf) => {
-                graphics_texture(&self.screen, dmabuf).map(|texture| (texture, dmabuf.stored_bottom_up()))
+                graphics_texture(&self.screen, dmabuf).map(|texture| (texture, dmabuf.stored_bottom_up))
             }
         };
         match picture {
@@ -932,8 +879,6 @@ impl Machine {
             }),
         );
     }
-
-    // ---- keyboard and pointer ---------------------------------------------------------------
 
     fn wire_input(self: &Rc<Self>) {
         // What is copied on this computer is offered to the guest while this window is in front.

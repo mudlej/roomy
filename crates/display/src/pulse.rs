@@ -11,7 +11,7 @@ use crate::audio::{AudioHost, Format};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -102,6 +102,9 @@ struct Stream {
     library: Arc<Library>,
     handle: *mut c_void,
 }
+
+// SAFETY: the raw stream handles live on their own threads; what is shared is behind locks and atomics.
+unsafe impl Send for Stream {}
 
 impl Stream {
     fn open(library: &Arc<Library>, name: &str, record: bool, format: Format) -> Result<Stream, String> {
@@ -320,11 +323,6 @@ impl PulseAudio {
         })
     }
 
-    /// Whether the sound library can be loaded on this computer.
-    pub fn available() -> Result<(), String> {
-        Library::load().map(|_| ())
-    }
-
     /// (received, played, recorded, requested) byte counts so far.
     pub fn totals(&self) -> (u64, u64, u64, u64) {
         let read = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
@@ -341,13 +339,10 @@ impl PulseAudio {
         if let Some(stream) = self.playing.lock().unwrap().get(&id) {
             // A full queue means the desktop is not taking sound right now; dropping
             // keeps the guest's sound current instead of ever further behind.
-            if let Err(TrySendError::Full(_)) = stream.try_send(message) {}
+            let _ = stream.try_send(message);
         }
     }
 }
-
-// SAFETY: the raw stream handles live on their own threads; what is shared is behind locks and atomics.
-unsafe impl Send for Stream {}
 
 impl AudioHost for PulseAudio {
     fn playback_start(&self, id: u64, format: Format) {

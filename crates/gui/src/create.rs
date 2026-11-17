@@ -1,8 +1,9 @@
 //! The "New Virtual Machine" dialog.
 
 use crate::Context;
-use crate::fields::{Amount, Holder, PortForwards, SHARED_FOLDERS_IN_THE_GUEST, SharedFolders};
-use crate::machine::SUSPEND_UNAVAILABLE_WITH_GPU;
+use crate::fields::{
+    Amount, FeatureSwitches, Form, Holder, PortForwards, SHARED_FOLDERS_IN_THE_GUEST, SharedFolders, host_size,
+};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use roomy_core::vm::{self, Features, Folder, NewVm};
@@ -40,17 +41,12 @@ fn chooser_for(title: &str, kind: &str, suffix: &str) -> gtk::FileDialog {
 
 /// Shows the dialog. `created` is called with the new VM's folder.
 pub fn show(context: &Rc<Context>, parent: &impl IsA<gtk::Widget>, created: impl Fn(Folder) + 'static) {
-    let host_cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
-    let host_memory_gb = (host::memory_mb(&context.env).unwrap_or(8192) / 1024).max(1);
-
-    let toasts = adw::ToastOverlay::new();
-    let complain = {
-        let toasts = toasts.clone();
-        move |message: &str| {
-            // Messages carry paths and other programs' words: shown as they are, never read as markup.
-            toasts.add_toast(adw::Toast::builder().use_markup(false).title(message).timeout(0).build());
-        }
-    };
+    let (host_cpus, host_memory_gb) = host_size(&context.env);
+    let page = adw::PreferencesPage::new();
+    let form = Form::new("New Virtual Machine", "Create", &page);
+    let complain = form.complainer();
+    let (dialog, create) = (form.dialog, form.confirm);
+    create.set_sensitive(false);
 
     let name = adw::EntryRow::builder().title("Name").build();
     let system = adw::ComboRow::builder().title("Guest system").build();
@@ -91,32 +87,12 @@ pub fn show(context: &Rc<Context>, parent: &impl IsA<gtk::Widget>, created: impl
     hardware.add(&memory.row);
     hardware.add(&disk.row);
 
-    let defaults = Features::default();
-    let gpu = adw::SwitchRow::builder()
-        .title("GPU acceleration")
-        .subtitle(SUSPEND_UNAVAILABLE_WITH_GPU)
-        .active(defaults.gpu_acceleration)
-        .build();
-    let network = adw::SwitchRow::builder()
-        .title("Network")
-        .subtitle("Internet access through this computer")
-        .active(defaults.network)
-        .build();
-    let clipboard = adw::SwitchRow::builder()
-        .title("Clipboard sharing")
-        .subtitle("Copy and paste text between the guest and this computer")
-        .active(defaults.clipboard)
-        .build();
-    let microphone = adw::SwitchRow::builder()
-        .title("Microphone")
-        .subtitle("Let the guest hear this computer's microphone")
-        .active(defaults.microphone)
-        .build();
+    let switches = FeatureSwitches::new(&Features::default());
     let features = adw::PreferencesGroup::builder().title("Features").build();
-    features.add(&gpu);
-    features.add(&network);
-    features.add(&clipboard);
-    features.add(&microphone);
+    features.add(&switches.gpu);
+    features.add(&switches.network);
+    features.add(&switches.clipboard);
+    features.add(&switches.microphone);
 
     let shared = SharedFolders::new(Vec::new(), SHARED_FOLDERS_IN_THE_GUEST);
 
@@ -142,40 +118,15 @@ pub fn show(context: &Rc<Context>, parent: &impl IsA<gtk::Widget>, created: impl
     let advanced_group = adw::PreferencesGroup::new();
     advanced_group.add(&advanced);
 
-    let page = adw::PreferencesPage::new();
     page.add(&general);
     page.add(&hardware);
     page.add(&features);
     page.add(&shared.group);
     page.add(&advanced_group);
 
-    let cancel = gtk::Button::with_label("Cancel");
-    let create = gtk::Button::with_label("Create");
-    create.add_css_class("suggested-action");
-    create.set_sensitive(false);
-    let header = adw::HeaderBar::builder().show_start_title_buttons(false).show_end_title_buttons(false).build();
-    header.pack_start(&cancel);
-    header.pack_end(&create);
-    toasts.set_child(Some(&page));
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&toasts));
-    let dialog = adw::Dialog::builder()
-        .title("New Virtual Machine")
-        .content_width(600)
-        .content_height(760)
-        .child(&toolbar)
-        .build();
-
     name.connect_changed({
         let create = create.clone();
         move |name| create.set_sensitive(!name.text().trim().is_empty())
-    });
-    cancel.connect_clicked({
-        let dialog = dialog.clone();
-        move |_| {
-            dialog.close();
-        }
     });
 
     choose_image.connect_clicked({
@@ -248,12 +199,7 @@ pub fn show(context: &Rc<Context>, parent: &impl IsA<gtk::Widget>, created: impl
                 disk_gb: disk.value() as u64,
                 install_image: image_path.borrow().clone(),
                 existing_disk: existing_path.borrow().clone(),
-                features: Features {
-                    gpu_acceleration: gpu.is_active(),
-                    network: network.is_active(),
-                    clipboard: clipboard.is_active(),
-                    microphone: microphone.is_active(),
-                },
+                features: switches.get(),
                 shared_folders: shared.get(),
                 port_forwards: forwards.get(),
             };

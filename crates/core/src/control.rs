@@ -8,7 +8,7 @@
 
 use crate::env::Env;
 use crate::error::Context;
-use crate::vm::Folder;
+use crate::vm::{Folder, remove_if_present};
 use crate::{Result, err};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -140,11 +140,7 @@ pub fn control_socket(env: &Env, folder: &Folder) -> PathBuf {
 /// Creates (or empties) a VM's runtime directory, readable by this user only.
 pub fn prepare_runtime_dir(env: &Env, folder: &Folder) -> Result<PathBuf> {
     let dir = runtime_dir(env, folder);
-    match fs::remove_dir_all(&dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(err!("cannot clear {}: {e}", dir.display())),
-    }
+    remove_if_present(&dir).context(format!("cannot clear {}", dir.display()))?;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -164,13 +160,9 @@ pub fn status(env: &Env, folder: &Folder) -> State {
 
 /// Sends a request to the VM's supervisor. Fails if the VM is not running.
 pub fn send(env: &Env, folder: &Folder, request: Request) -> Result<Reply> {
-    let not_running = || err!("the virtual machine is not running");
-    let mut stream = UnixStream::connect(control_socket(env, folder)).map_err(|_| not_running())?;
     // Saving a large guest to a slow disk can take minutes; everything else is quick.
     let limit = if request == Request::Suspend { Duration::from_secs(30 * 60) } else { Duration::from_secs(60) };
-    stream.set_read_timeout(Some(limit)).context("cannot configure the control connection")?;
-    let line = serde_json::to_string(&request).expect("requests always serialize");
-    stream.write_all(format!("{line}\n").as_bytes()).map_err(|_| not_running())?;
+    let stream = connect_and_send(env, folder, request, limit)?;
     let mut reply = String::new();
     match BufReader::new(stream).read_line(&mut reply) {
         Ok(0) => Err(err!("the virtual machine stopped before answering")),
@@ -182,12 +174,7 @@ pub fn send(env: &Env, folder: &Folder, request: Request) -> Result<Reply> {
 /// Opens a private connection to a running VM's screen, sound and clipboard
 /// (QEMU's D-Bus display protocol, spoken directly over the returned socket).
 pub fn open_display(env: &Env, folder: &Folder) -> Result<OwnedFd> {
-    let not_running = || err!("the virtual machine is not running");
-    let mut stream = UnixStream::connect(control_socket(env, folder)).map_err(|_| not_running())?;
-    stream.set_read_timeout(Some(Duration::from_secs(60))).context("cannot configure the control connection")?;
-    let line = serde_json::to_string(&Request::Display).expect("requests always serialize");
-    stream.write_all(format!("{line}\n").as_bytes()).map_err(|_| not_running())?;
-
+    let stream = connect_and_send(env, folder, Request::Display, Duration::from_secs(60))?;
     let (mut text, mut connection, mut buf) = (Vec::new(), None, [0u8; 4096]);
     while !text.contains(&b'\n') {
         let (count, fd) = crate::fdpass::recv_with_fd(&stream, &mut buf)
@@ -208,6 +195,17 @@ pub fn open_display(env: &Env, folder: &Folder) -> Result<OwnedFd> {
         (true, None) => Err(err!("the supervisor did not hand over the display connection")),
         (false, _) => Err(err!("{}", reply.error.unwrap_or_else(|| "the display could not be opened".into()))),
     }
+}
+
+/// Sends one request line to the VM's supervisor and leaves the connection waiting at most
+/// `limit` for each read of the reply.
+fn connect_and_send(env: &Env, folder: &Folder, request: Request, limit: Duration) -> Result<UnixStream> {
+    let not_running = || err!("the virtual machine is not running");
+    let mut stream = UnixStream::connect(control_socket(env, folder)).map_err(|_| not_running())?;
+    stream.set_read_timeout(Some(limit)).context("cannot configure the control connection")?;
+    let line = serde_json::to_string(&request).expect("requests always serialize");
+    stream.write_all(format!("{line}\n").as_bytes()).map_err(|_| not_running())?;
+    Ok(stream)
 }
 
 /// Like [`send`], but a refusal by the supervisor becomes an error.

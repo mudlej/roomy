@@ -27,19 +27,18 @@ pub fn run_capture(program: &Path, args: &[&str], limit: Duration) -> io::Result
             format!("{} did not finish within {limit:?}", program.display()),
         ));
     };
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        let mut bytes = Vec::new();
-        out.read_to_end(&mut bytes)?;
-        stdout = String::from_utf8_lossy(&bytes).into_owned();
-    }
-    if let Some(mut err) = child.stderr.take() {
-        let mut bytes = Vec::new();
-        err.read_to_end(&mut bytes)?;
-        stderr = String::from_utf8_lossy(&bytes).into_owned();
-    }
+    let stdout = read_all(child.stdout.take())?;
+    let stderr = read_all(child.stderr.take())?;
     Ok(Captured { status, stdout, stderr })
+}
+
+/// Everything left to read from a child's output, as text.
+fn read_all(pipe: Option<impl Read>) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut bytes)?;
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Waits for a child to exit. Returns `None` if it is still running after `limit`.

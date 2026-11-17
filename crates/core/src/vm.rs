@@ -21,6 +21,7 @@ use crate::{Result, err, qemu};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -195,9 +196,8 @@ impl Folder {
     /// made on one computer and moved to another can differ from what the firmware installed
     /// there would suggest. `None` when the file cannot be read.
     pub fn firmware_vars_format(&self) -> Option<&'static str> {
-        use std::io::Read;
         let mut magic = [0u8; 4];
-        let mut file = fs::File::open(self.firmware_vars()).ok()?;
+        let mut file = File::open(self.firmware_vars()).ok()?;
         let read = file.read(&mut magic).ok()?;
         Some(if read == magic.len() && magic == *b"QFI\xfb" { "qcow2" } else { "raw" })
     }
@@ -208,6 +208,17 @@ impl Folder {
 
     pub fn lock_path(&self) -> PathBuf {
         self.dir.join(".lock")
+    }
+
+    /// Takes the folder's lock, which whoever runs or takes apart the VM holds for as long as
+    /// that lasts. `Ok(None)` when someone else holds it. The lock goes with the returned file.
+    pub fn try_lock(&self) -> Result<Option<File>> {
+        let path = self.lock_path();
+        let file =
+            File::options().create(true).append(true).open(&path).context(format!("cannot open {}", path.display()))?;
+        // SAFETY: flock on a descriptor we own; the lock is released when the file is closed.
+        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        Ok(locked.then_some(file))
     }
 
     /// A small picture of the screen as the window last showed it, for lists of VMs.
@@ -260,18 +271,19 @@ impl Folder {
     /// Throws away a suspended guest's saved memory. The next start is a
     /// normal boot, as after a power cut at the moment of suspending.
     pub fn discard_saved_state(&self) -> Result<()> {
-        for path in [self.saved_state(), self.saved_state_partial(), self.saved_state_consumed(), self.saved_config()] {
-            remove_if_present(&path)?;
-        }
-        Ok(())
+        remove_files(&[
+            self.saved_state(),
+            self.saved_state_partial(),
+            self.saved_state_consumed(),
+            self.saved_config(),
+        ])
     }
 
     /// Removes leftovers of a suspend or restore that was interrupted.
     pub fn clean_interrupted_state(&self) -> Result<()> {
-        remove_if_present(&self.saved_state_partial())?;
-        remove_if_present(&self.saved_state_consumed())?;
+        remove_files(&[self.saved_state_partial(), self.saved_state_consumed()])?;
         if !self.is_suspended() {
-            remove_if_present(&self.saved_config())?;
+            remove_files(&[self.saved_config()])?;
         }
         Ok(())
     }
@@ -286,15 +298,9 @@ impl Folder {
 
 /// Creates a new VM folder under `parent`, named after the VM.
 pub fn create(env: &Env, parent: &Path, new: NewVm) -> Result<Folder> {
-    let qemu_path = env
-        .find_program(host::QEMU_PROGRAM)
-        .ok_or_else(|| err!("QEMU is not installed (run: {} setup)", crate::env::roomy_command()))?;
-    let qemu_img = env
-        .find_program("qemu-img")
-        .ok_or_else(|| err!("qemu-img is not installed (run: {} setup)", crate::env::roomy_command()))?;
-    let firmware = host::find_firmware(env).ok_or_else(|| {
-        err!("no UEFI firmware for virtual machines found (run: {} doctor)", crate::env::roomy_command())
-    })?;
+    let qemu_path = env.require(host::QEMU_PROGRAM)?;
+    let qemu_img = env.require("qemu-img")?;
+    let firmware = host::require_firmware(env)?;
 
     let config = Config {
         schema: SCHEMA,
@@ -430,12 +436,24 @@ pub fn sync_parent(path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn remove_if_present(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
+/// Removes a file, or a directory with everything in it. One that is not there is fine.
+pub(crate) fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    let removed = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(e) => Err(e),
+    };
+    match removed {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(err!("cannot remove {}: {e}", path.display())),
+        other => other,
     }
+}
+
+fn remove_files(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        remove_if_present(path).context(format!("cannot remove {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn random_bytes<const N: usize>() -> Result<[u8; N]> {
@@ -528,6 +546,9 @@ mod tests {
 
     #[test]
     fn impossible_settings_are_rejected() {
+        fn share(name: &str) -> SharedFolder {
+            SharedFolder { name: name.into(), path: "/tmp".into() }
+        }
         let broken = |change: fn(&mut Config)| {
             let mut config = example_config();
             change(&mut config);
@@ -537,14 +558,8 @@ mod tests {
         assert!(broken(|c| c.cpus = 0).contains("at least 1 processor"));
         assert!(broken(|c| c.memory_mb = 128).contains("256 MB"));
         assert!(broken(|c| c.disk = "../other.qcow2".into()).contains("inside the virtual machine's folder"));
-        let share = |name: &str| SharedFolder { name: name.into(), path: "/tmp".into() };
-        assert!(
-            broken(|c| c.shared_folders = vec![SharedFolder { name: "my files".into(), path: "/tmp".into() }])
-                .contains("not usable")
-        );
-        let mut twice = example_config();
-        twice.shared_folders = vec![share("docs"), share("docs")];
-        assert!(twice.validate().unwrap_err().message().contains("both named 'docs'"));
+        assert!(broken(|c| c.shared_folders = vec![share("my files")]).contains("not usable"));
+        assert!(broken(|c| c.shared_folders = vec![share("docs"), share("docs")]).contains("both named 'docs'"));
     }
 
     #[test]

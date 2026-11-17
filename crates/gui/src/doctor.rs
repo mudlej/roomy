@@ -185,13 +185,7 @@ impl Doctor {
 
     /// Says why nothing can be installed from here, with the text ready to copy.
     fn explain(&self, heading: &str, body: &str) {
-        let dialog = adw::AlertDialog::new(Some(heading), Some(body));
-        dialog.add_responses(&[("copy", "Copy"), ("close", "Close")]);
-        dialog.set_default_response(Some("close"));
-        dialog.set_close_response("close");
-        let body = body.to_owned();
-        dialog.connect_response(Some("copy"), move |dialog, _| dialog.clipboard().set_text(&body));
-        dialog.present(Some(&self.dialog));
+        crate::show_copyable(&self.dialog, heading, body, "Copy");
     }
 
     fn confirm(self: &Rc<Self>, plan: setup::InstallPlan, commands: Vec<Vec<String>>) {
@@ -248,9 +242,7 @@ impl Doctor {
             Ok(log) => log,
             Err(e) => {
                 self.busy.set(false);
-                self.toasts.add_toast(
-                    adw::Toast::builder().use_markup(false).title(format!("Cannot keep a log: {e}")).build(),
-                );
+                crate::toast(&self.toasts, &format!("Cannot keep a log: {e}"), 5);
                 return;
             }
         };

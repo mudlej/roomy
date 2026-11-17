@@ -5,11 +5,13 @@
 //! roomy uses, so "ok" means the feature works here and a failure carries
 //! QEMU's own error message.
 
+use crate::MIN_QEMU;
 use crate::env::{Env, roomy_command};
 use crate::host::{self, CpuVirtualization, Firmware, KvmAccess, Version};
-use crate::process::{KillOnDrop, read_tail, run_capture, spawn_logged, wait_until, wait_with_limit};
+use crate::process::{KillOnDrop, read_tail, run_capture, spawn_logged, wait_with_limit};
 use crate::qmp::Qmp;
-use crate::{MIN_QEMU, shares};
+use crate::shares::{self, DaemonFailure};
+use crate::time::utc_timestamp;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
@@ -205,7 +207,7 @@ pub fn run(env: &Env) -> Report {
                 checks.push(devices);
                 checks.push(check_firmware(&trial, firmware.as_ref()));
                 checks.push(check_shared_folders(&trial, virtiofsd.as_deref()));
-                let render_node = env.render_node.clone().or_else(|| host::display_gpu(env).map(|gpu| gpu.render_node));
+                let render_node = env.vm_render_node();
                 if let Some(node) = &render_node {
                     facts.push(("Graphics card for VMs", node.display().to_string()));
                 }
@@ -214,7 +216,7 @@ pub fn run(env: &Env) -> Report {
                 checks.push(if display_works {
                     check_gpu(&trial, render_node.as_deref())
                 } else {
-                    let (id, title) = TRIAL_CHECKS[3];
+                    let (id, title) = GPU;
                     Check::new(id, title, Status::Skipped, "not checked: the display has to work first (see above)")
                 });
             } else {
@@ -222,11 +224,11 @@ pub fn run(env: &Env) -> Report {
             }
         }
         (Some(_), Err(e)) => {
-            checks.push(
-                Check::new("vm-start", "Starting a virtual machine", Status::Failed,
-                    format!("cannot create a working directory in {}: {e}", env.runtime_dir.display()))
-                .fix("roomy keeps control sockets in your session's runtime directory (XDG_RUNTIME_DIR). Make sure you are in a normal login session and that directory is writable."),
-            );
+            let summary = format!("cannot create a working directory in {}: {e}", env.runtime_dir.display());
+            checks.push(Check::new("vm-start", "Starting a virtual machine", Status::Failed, summary).fix(
+                "roomy keeps control sockets in your session's runtime directory (XDG_RUNTIME_DIR). Make sure you \
+                 are in a normal login session and that directory is writable.",
+            ));
             checks.extend(skipped_trials("no working directory"));
         }
         (None, _) => {
@@ -253,6 +255,9 @@ pub const WINDOW_PROGRAM: &str = "roomy-gui";
 /// which work from the command line regardless.
 pub fn check_window(program: Option<&Path>) -> Check {
     const TITLE: &str = "roomy's window";
+    let reinstall = || {
+        format!("Reinstall roomy; virtual machines can still be used with '{} vm' commands meanwhile.", roomy_command())
+    };
     let Some(program) = program else {
         return Check::new(
             "window",
@@ -260,7 +265,7 @@ pub fn check_window(program: Option<&Path>) -> Check {
             Status::Warning,
             format!("{WINDOW_PROGRAM} is not installed next to roomy"),
         )
-        .fix("Reinstall roomy; virtual machines can still be used with 'roomy vm' commands meanwhile.");
+        .fix(reinstall());
     };
     match run_capture(program, &["--probe"], Duration::from_secs(15)) {
         Ok(out) if out.status.success() => Check::new("window", TITLE, Status::Ok, "the window can start"),
@@ -268,7 +273,7 @@ pub fn check_window(program: Option<&Path>) -> Check {
             .fix_by_setup("Install GTK 4 (4.14 or newer) and libadwaita (1.5 or newer).")
             .log(format!("{}{}", out.stdout, out.stderr)),
         Err(e) => Check::new("window", TITLE, Status::Warning, format!("{} could not be run: {e}", program.display()))
-            .fix("Reinstall roomy; virtual machines can still be used with 'roomy vm' commands meanwhile."),
+            .fix(reinstall()),
     }
 }
 
@@ -297,12 +302,12 @@ pub fn check_sound() -> Check {
     }
 }
 
-const TRIAL_CHECKS: [(&str, &str); 4] = [
-    ("devices", "Display, sound and clipboard devices"),
-    ("firmware", "UEFI firmware"),
-    ("shared-folders", "Shared folders"),
-    ("gpu", "GPU acceleration"),
-];
+/// The checks that each start a trial virtual machine once a plain one has started: id and title.
+const DEVICES: (&str, &str) = ("devices", "Display, sound and clipboard devices");
+const FIRMWARE: (&str, &str) = ("firmware", "UEFI firmware");
+const SHARED_FOLDERS: (&str, &str) = ("shared-folders", "Shared folders");
+const GPU: (&str, &str) = ("gpu", "GPU acceleration");
+const TRIAL_CHECKS: [(&str, &str); 4] = [DEVICES, FIRMWARE, SHARED_FOLDERS, GPU];
 
 /// The part of QEMU its refusal says is not installed. Distributions package QEMU's displays,
 /// sound outputs and devices separately, and QEMU names the first one it misses.
@@ -418,7 +423,7 @@ fn check_vm_start(trial: &Trial) -> (Check, Option<String>) {
 }
 
 fn check_devices(trial: &Trial) -> Check {
-    let (id, title) = TRIAL_CHECKS[0];
+    let (id, title) = DEVICES;
     let outcome = trial.run(
         "devices",
         &[
@@ -455,7 +460,7 @@ fn check_devices(trial: &Trial) -> Check {
 }
 
 fn check_firmware(trial: &Trial, firmware: Option<&Firmware>) -> Check {
-    let (id, title) = TRIAL_CHECKS[1];
+    let (id, title) = FIRMWARE;
     let Some(firmware) = firmware else {
         return Check::new(id, title, Status::Failed, "no UEFI firmware for virtual machines was found")
             .fix_by_setup("Install the OVMF / edk2 firmware package for x86-64.");
@@ -476,7 +481,7 @@ fn check_firmware(trial: &Trial, firmware: Option<&Firmware>) -> Check {
 }
 
 fn check_shared_folders(trial: &Trial, virtiofsd: Option<&Path>) -> Check {
-    let (id, title) = TRIAL_CHECKS[2];
+    let (id, title) = SHARED_FOLDERS;
     let Some(virtiofsd) = virtiofsd else {
         return Check::new(id, title, Status::Warning, "virtiofsd is not installed; shared folders are unavailable")
             .fix_by_setup("");
@@ -490,17 +495,13 @@ fn check_shared_folders(trial: &Trial, virtiofsd: Option<&Path>) -> Check {
     if let Err(e) = fs::create_dir_all(&shared) {
         return unavailable("cannot create a test folder", e.to_string());
     }
-    // SAFETY: getuid and getgid cannot fail.
-    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    let args = shares::virtiofsd_args(&socket, &shared, uid, gid, shares::DEFAULT_GUEST_UID);
-    let mut daemon = match spawn_logged(virtiofsd, &args, &log_path) {
-        Ok(child) => KillOnDrop(child),
-        Err(e) => return unavailable("virtiofsd could not be started", e.to_string()),
+    let _daemon = match shares::start_daemon(virtiofsd, &socket, &shared, &log_path) {
+        Ok(daemon) => daemon,
+        Err(DaemonFailure::CannotRun(e)) => return unavailable("virtiofsd could not be started", e.to_string()),
+        Err(DaemonFailure::DidNotStart) => {
+            return unavailable("virtiofsd did not accept roomy's configuration", read_tail(&log_path, 15));
+        }
     };
-    let came_up = wait_until(Duration::from_secs(8), || socket.exists() || !daemon.running());
-    if !came_up || !daemon.running() {
-        return unavailable("virtiofsd did not accept roomy's configuration", read_tail(&log_path, 15));
-    }
     let chardev = format!("socket,id=fs0,path={}", socket.display());
     let outcome = trial.run(
         "shared-folders",
@@ -516,7 +517,7 @@ fn check_shared_folders(trial: &Trial, virtiofsd: Option<&Path>) -> Check {
 }
 
 fn check_gpu(trial: &Trial, render_node: Option<&Path>) -> Check {
-    let (id, title) = TRIAL_CHECKS[3];
+    let (id, title) = GPU;
     // On the same graphics card a VM would use.
     let display = match render_node {
         Some(node) => format!("dbus,p2p=yes,gl=on,rendernode={}", node.display()),
@@ -645,41 +646,9 @@ impl Trial<'_> {
     }
 }
 
-/// Formats a time as `YYYY-MM-DD HH:MM` in UTC.
-/// UTC date and time to the second, for log lines.
-pub(crate) fn utc_timestamp_secs(time: SystemTime) -> String {
-    let secs = time.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    format!("{}:{:02}", utc_timestamp(time), secs % 60)
-}
-
-fn utc_timestamp(time: SystemTime) -> String {
-    let secs = time.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Civil-from-days (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", rem / 3_600, rem % 3_600 / 60)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn timestamps_are_utc_calendar_dates() {
-        let at = |secs| utc_timestamp(UNIX_EPOCH + Duration::from_secs(secs));
-        assert_eq!(at(0), "1970-01-01 00:00");
-        assert_eq!(at(951_782_400), "2000-02-29 00:00");
-        assert_eq!(at(1_794_866_290), "2026-11-16 21:58");
-        assert_eq!(at(1_798_761_599), "2026-12-31 23:59");
-    }
 
     fn report(statuses: &[Status]) -> Report {
         Report {

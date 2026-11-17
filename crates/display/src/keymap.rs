@@ -45,6 +45,11 @@ const LINUX_TO_QNUM: [u8; 240] = [
 mod tests {
     use super::*;
 
+    mod keys_linux {
+        pub const LEFT_CTRL: u32 = 29;
+        pub const LEFT_ALT: u32 = 56;
+    }
+
     #[test]
     fn plain_keys_keep_their_scancode_and_extended_keys_get_the_high_bit() {
         // (Linux input code, QEMU number): A, Enter, keypad Enter, right Ctrl, Up, left Super, Delete, F11.
@@ -55,11 +60,6 @@ mod tests {
         }
         assert_eq!(qnum_from_linux(keys_linux::LEFT_CTRL), Some(keys::LEFT_CTRL));
         assert_eq!(qnum_from_linux(keys_linux::LEFT_ALT), Some(keys::LEFT_ALT));
-    }
-
-    mod keys_linux {
-        pub const LEFT_CTRL: u32 = 29;
-        pub const LEFT_ALT: u32 = 56;
     }
 
     #[test]

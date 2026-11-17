@@ -4,6 +4,18 @@
 //! so that `roomy doctor` and `roomy setup` work on a computer where the
 //! window cannot start yet.
 
+/// A closure that holds `$owner` (an `Rc`) only weakly, and does nothing once it is gone.
+macro_rules! on {
+    ($owner:expr, |$this:ident $(, $arg:pat_param)*| $body:expr) => {{
+        let weak = std::rc::Rc::downgrade($owner);
+        move |$($arg),*| {
+            if let Some($this) = weak.upgrade() {
+                $body
+            }
+        }
+    }};
+}
+
 mod create;
 mod doctor;
 mod fields;
@@ -16,12 +28,12 @@ mod settings;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
+use roomy_core::control::State;
 use roomy_core::env::Env;
+use roomy_core::launcher::APP_ID;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-
-use roomy_core::launcher::APP_ID;
 
 /// What every window needs to know about its surroundings.
 pub struct Context {
@@ -52,6 +64,51 @@ pub fn plain_row(title: &str, subtitle: &str) -> adw::ActionRow {
     row.set_title(title);
     row.set_subtitle(subtitle);
     row
+}
+
+/// Shows a short message over `toasts` for `seconds`, or until it is dismissed when `seconds` is 0.
+pub fn toast(toasts: &adw::ToastOverlay, message: &str, seconds: u32) {
+    // Messages carry paths and other programs' words: shown as they are, never read as markup.
+    toasts.add_toast(adw::Toast::builder().use_markup(false).title(message).timeout(seconds).build());
+}
+
+/// Asks before something that cannot be undone. `then` runs if the user goes ahead.
+pub fn confirm(parent: &impl IsA<gtk::Widget>, heading: &str, body: &str, go: &str, then: impl Fn() + 'static) {
+    let dialog = adw::AlertDialog::new(Some(heading), Some(body));
+    dialog.add_responses(&[("cancel", "Cancel"), ("go", go)]);
+    dialog.set_response_appearance("go", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.connect_response(None, move |_, response| {
+        if response == "go" {
+            then()
+        }
+    });
+    dialog.present(Some(parent));
+}
+
+/// A message with details worth reading and copying, such as another program's own words.
+pub fn show_copyable(parent: &impl IsA<gtk::Widget>, heading: &str, body: &str, copy: &str) {
+    let dialog = adw::AlertDialog::new(Some(heading), Some(body));
+    dialog.add_responses(&[("copy", copy), ("close", "Close")]);
+    dialog.set_default_response(Some("close"));
+    dialog.set_close_response("close");
+    let body = body.to_owned();
+    dialog.connect_response(Some("copy"), move |dialog, _| dialog.clipboard().set_text(&body));
+    dialog.present(Some(parent));
+}
+
+/// A VM's state in the words the windows show.
+pub fn state_words(state: State) -> &'static str {
+    match state {
+        State::Off => "Off",
+        State::Suspended => "Suspended",
+        State::Starting => "Starting…",
+        State::Running => "Running",
+        State::Paused => "Paused",
+        State::Suspending => "Suspending…",
+        State::Stopping => "Shutting down…",
+    }
 }
 
 /// The graphics devices this program has open.

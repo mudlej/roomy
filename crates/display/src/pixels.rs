@@ -8,13 +8,13 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 /// Pixman format codes QEMU uses for guest screens.
-pub const PIXMAN_X8R8G8B8: u32 = 0x2002_0888;
-pub const PIXMAN_A8R8G8B8: u32 = 0x2002_8888;
-pub const PIXMAN_R8G8B8: u32 = 0x1802_0888;
-pub const PIXMAN_R5G6B5: u32 = 0x1002_0565;
+pub(crate) const PIXMAN_X8R8G8B8: u32 = 0x2002_0888;
+pub(crate) const PIXMAN_A8R8G8B8: u32 = 0x2002_8888;
+pub(crate) const PIXMAN_R8G8B8: u32 = 0x1802_0888;
+pub(crate) const PIXMAN_R5G6B5: u32 = 0x1002_0565;
 
 /// Bytes per pixel of a format, or `None` if roomy cannot draw it.
-pub fn bytes_per_pixel(pixman_format: u32) -> Option<usize> {
+pub(crate) fn bytes_per_pixel(pixman_format: u32) -> Option<usize> {
     match pixman_format {
         PIXMAN_X8R8G8B8 | PIXMAN_A8R8G8B8 => Some(4),
         PIXMAN_R8G8B8 => Some(3),

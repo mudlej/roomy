@@ -1,6 +1,13 @@
 //! Shared folders: how roomy runs the virtiofsd daemon.
 
+use crate::host::Version;
+use crate::process::{KillOnDrop, spawn_logged, wait_until};
+use std::io;
 use std::path::Path;
+use std::time::Duration;
+
+/// Oldest virtiofsd roomy asks distributions for.
+pub const MIN_VIRTIOFSD: Version = Version { major: 1, minor: 13, micro: 0 };
 
 /// The user ID that the first regular user gets on nearly every Linux
 /// distribution. Host files show up in the guest as owned by this user.
@@ -38,4 +45,30 @@ pub fn virtiofsd_args(socket: &Path, shared_dir: &Path, host_uid: u32, host_gid:
         "--migration-verify-handles".into(),
         "--migration-confirm-paths".into(),
     ]
+}
+
+/// Why a shared folder's daemon is not running.
+#[derive(Debug)]
+pub enum DaemonFailure {
+    /// The program could not be run at all.
+    CannotRun(io::Error),
+    /// It ran, but ended or never opened its socket; its log says why.
+    DidNotStart,
+}
+
+/// Starts virtiofsd for the folder `shared_dir` with its output appended to `log`, and waits
+/// until it listens on `socket`. Files of this computer's user show up in the guest as owned
+/// by [`DEFAULT_GUEST_UID`].
+pub fn start_daemon(
+    virtiofsd: &Path,
+    socket: &Path,
+    shared_dir: &Path,
+    log: &Path,
+) -> Result<KillOnDrop, DaemonFailure> {
+    // SAFETY: getuid and getgid cannot fail.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let args = virtiofsd_args(socket, shared_dir, uid, gid, DEFAULT_GUEST_UID);
+    let mut daemon = KillOnDrop(spawn_logged(virtiofsd, &args, log).map_err(DaemonFailure::CannotRun)?);
+    let up = wait_until(Duration::from_secs(8), || socket.exists() || !daemon.running());
+    if up && daemon.running() { Ok(daemon) } else { Err(DaemonFailure::DidNotStart) }
 }

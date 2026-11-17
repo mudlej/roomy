@@ -10,6 +10,7 @@
 //! changes are passed on as [`Event`]s, and input is sent without waiting
 //! for a reply.
 
+mod args;
 pub mod audio;
 pub mod clipboard;
 pub mod keymap;
@@ -17,6 +18,7 @@ pub mod pixels;
 pub mod pulse;
 pub mod view;
 
+use args::{arg, bytes};
 use gio::prelude::*;
 use glib::variant::Handle;
 use pixels::Mapping;
@@ -99,12 +101,10 @@ pub struct Dmabuf {
     pub stride: u32,
     pub fourcc: u32,
     pub modifier: u64,
-    /// QEMU's `y0_top` flag, which speaks in OpenGL's bottom-up terms: when it
-    /// is set, the first row in memory is the bottom of the picture as the
-    /// guest shows it, so the picture must be turned over to be drawn top-down.
-    /// (Seen on a real host: the guest's text console comes with the flag
-    /// clear and is the right way up as stored.)
-    pub y0_top: bool,
+    /// The first row in memory is the bottom of the picture as the guest shows
+    /// it, so the picture must be turned over to be drawn. This is QEMU's
+    /// `y0_top` flag, which speaks in OpenGL's bottom-up terms.
+    pub stored_bottom_up: bool,
 }
 
 /// Something the guest's display did. Delivered on the display thread.
@@ -188,13 +188,6 @@ pub struct Display {
     info: ConsoleInfo,
 }
 
-impl Dmabuf {
-    /// Whether the rows are stored bottom first and must be turned over when drawn.
-    pub fn stored_bottom_up(&self) -> bool {
-        self.y0_top
-    }
-}
-
 impl Display {
     /// Connects over `socket` and starts listening to the guest's screen.
     /// `on_event` is called on the display thread and must return quickly.
@@ -241,33 +234,28 @@ impl Display {
 
     /// Presses or releases a key, given its QEMU key number (see [`keymap`]).
     pub fn key(&self, qnum: u32, pressed: bool) {
-        self.send(&console_path(), KEYBOARD_IFACE, if pressed { "Press" } else { "Release" }, &(qnum,).to_variant());
+        self.send(CONSOLE, KEYBOARD_IFACE, if pressed { "Press" } else { "Release" }, &(qnum,).to_variant());
     }
 
     /// Moves the pointer to a position in guest pixels (absolute pointers only).
     pub fn pointer_position(&self, x: u32, y: u32) {
-        self.send(&console_path(), MOUSE_IFACE, "SetAbsPosition", &(x, y).to_variant());
+        self.send(CONSOLE, MOUSE_IFACE, "SetAbsPosition", &(x, y).to_variant());
     }
 
     /// Moves the pointer by a distance (relative pointers only).
     pub fn pointer_motion(&self, dx: i32, dy: i32) {
-        self.send(&console_path(), MOUSE_IFACE, "RelMotion", &(dx, dy).to_variant());
+        self.send(CONSOLE, MOUSE_IFACE, "RelMotion", &(dx, dy).to_variant());
     }
 
     pub fn button(&self, button: Button, pressed: bool) {
         let method = if pressed { "Press" } else { "Release" };
-        self.send(&console_path(), MOUSE_IFACE, method, &(button as u32,).to_variant());
+        self.send(CONSOLE, MOUSE_IFACE, method, &(button as u32,).to_variant());
     }
 
     /// Tells the guest how large the window's drawing area is, in pixels and
     /// millimetres, so a guest with display integration can match it.
     pub fn set_window_size(&self, width: u32, height: u32, width_mm: u16, height_mm: u16) {
-        self.send(
-            &console_path(),
-            CONSOLE_IFACE,
-            "SetUIInfo",
-            &(width_mm, height_mm, 0i32, 0i32, width, height).to_variant(),
-        );
+        self.send(CONSOLE, CONSOLE_IFACE, "SetUIInfo", &(width_mm, height_mm, 0i32, 0i32, width, height).to_variant());
     }
 
     /// Offers `text` to the guest as the clipboard's content, or withdraws the
@@ -340,10 +328,6 @@ impl Drop for Display {
     }
 }
 
-fn console_path() -> String {
-    CONSOLE.to_owned()
-}
-
 type Ready = Result<(gio::DBusConnection, glib::MainLoop, ConsoleInfo), String>;
 
 fn display_thread(
@@ -368,9 +352,8 @@ fn display_thread(
             let _ = ready.send(Err(e));
         }
     };
-    if context.with_thread_default(run).is_err() {
-        // Cannot happen for a context created on this thread; nothing to report to.
-    }
+    // Fails only for a context that another thread owns, which this one cannot be.
+    let _ = context.with_thread_default(run);
 }
 
 pub(crate) fn stream_for(socket: OwnedFd) -> Result<gio::SocketConnection, String> {
@@ -544,19 +527,6 @@ fn pointer_mode_change(message: &gio::DBusMessage) -> Option<bool> {
 
 /// Turns one call from QEMU into an event.
 fn decode(method: &str, parameters: &glib::Variant, invocation: &gio::DBusMethodInvocation) -> Result<Event, String> {
-    fn arg<T: glib::variant::FromVariant>(parameters: &glib::Variant, index: usize) -> Result<T, String> {
-        if index >= parameters.n_children() {
-            return Err(format!("argument {index} is missing"));
-        }
-        parameters.child_value(index).get().ok_or_else(|| format!("argument {index} has an unexpected type"))
-    }
-    fn bytes(parameters: &glib::Variant, index: usize) -> Result<Vec<u8>, String> {
-        if index >= parameters.n_children() {
-            return Err(format!("argument {index} is missing"));
-        }
-        let data = parameters.child_value(index);
-        data.fixed_array::<u8>().map(<[u8]>::to_vec).map_err(|_| format!("argument {index} is not a byte array"))
-    }
     let descriptor = |index: usize| -> Result<OwnedFd, String> {
         let Handle(handle) = arg(parameters, index)?;
         let list = invocation.message().unix_fd_list().ok_or("no file descriptor came with the call")?;
@@ -601,7 +571,7 @@ fn decode(method: &str, parameters: &glib::Variant, invocation: &gio::DBusMethod
             stride: arg(p, 3)?,
             fourcc: arg(p, 4)?,
             modifier: arg(p, 5)?,
-            y0_top: arg(p, 6)?,
+            stored_bottom_up: arg(p, 6)?,
         }),
         "UpdateDMABUF" => Event::UpdateDmabuf { x: arg(p, 0)?, y: arg(p, 1)?, width: arg(p, 2)?, height: arg(p, 3)? },
         "Disable" => Event::Disable,

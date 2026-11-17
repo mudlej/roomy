@@ -2,10 +2,10 @@
 
 use crate::{EXIT_PROBLEMS, EXIT_USAGE, usage_error};
 use roomy_core::control::{self, Request, State};
-use roomy_core::env::Env;
+use roomy_core::env::{Env, roomy_command};
 use roomy_core::settings::{self, Applies, Changes};
 use roomy_core::vm::{self, Features, Folder, NewVm, PortForward, SharedFolder};
-use roomy_core::{Error, Result, library, supervisor};
+use roomy_core::{Error, Result, err, library, supervisor};
 use std::fs::File;
 use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
@@ -13,73 +13,94 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub fn run(args: &[String]) -> ExitCode {
-    let Some((action, rest)) = args.split_first() else {
-        return usage_error("'roomy vm' needs an action, for example: roomy vm status <vm-folder>");
+    let Some((name, rest)) = args.split_first() else {
+        return usage_error(&format!(
+            "'roomy vm' needs an action, for example: {} vm status <vm-folder>",
+            roomy_command()
+        ));
     };
-    match action.as_str() {
+    match name.as_str() {
         "create" => return report(create(rest)),
         "list" if rest.is_empty() => return report(list()),
+        "list" => return usage_error("'roomy vm list' takes no arguments"),
         "delete" => return report(delete(rest)),
         "set" => return report(set(rest)),
         _ => {}
     }
-    let [folder] = rest else {
-        return usage_error(&format!("'roomy vm {action}' takes exactly one argument: the VM's folder"));
+    let Some(action) = Action::named(name) else {
+        return usage_error(&format!("unknown action '{name}' for 'roomy vm'"));
     };
-    let env = Env::system();
-    let outcome = Folder::open(Path::new(folder)).and_then(|folder| act(&env, &folder, action));
-    match outcome {
-        Ok(Some(line)) => {
-            println!("{line}");
-            ExitCode::SUCCESS
-        }
-        Ok(None) => usage_error(&format!("unknown action '{action}' for 'roomy vm'")),
-        Err(e) => fail(&e),
+    let [folder] = rest else {
+        return usage_error(&format!("'roomy vm {name}' takes exactly one argument: the VM's folder"));
+    };
+    report(Folder::open(Path::new(folder)).and_then(|folder| act(&Env::system(), &folder, action)))
+}
+
+/// What `roomy vm <action> <vm-folder>` does.
+enum Action {
+    Status,
+    Start,
+    DiscardState,
+    Add,
+    Forget,
+    /// Something only the VM's supervisor can do.
+    Ask(Request),
+}
+
+impl Action {
+    fn named(name: &str) -> Option<Action> {
+        Some(match name {
+            "status" => Action::Status,
+            "start" => Action::Start,
+            "discard-state" => Action::DiscardState,
+            "add" => Action::Add,
+            "forget" => Action::Forget,
+            "pause" => Action::Ask(Request::Pause),
+            "resume" => Action::Ask(Request::Resume),
+            "suspend" => Action::Ask(Request::Suspend),
+            "shutdown" => Action::Ask(Request::Shutdown),
+            "restart" => Action::Ask(Request::Restart),
+            "force-off" => Action::Ask(Request::ForceOff),
+            "force-restart" => Action::Ask(Request::ForceRestart),
+            _ => return None,
+        })
     }
 }
 
-/// Carries out one action; `Ok(None)` means the action name is unknown.
-fn act(env: &Env, folder: &Folder, action: &str) -> Result<Option<String>> {
-    let request = match action {
-        "status" => return Ok(Some(control::status(env, folder).word().to_owned())),
-        "start" => {
+/// Carries out one action and says how the VM is now.
+fn act(env: &Env, folder: &Folder, action: Action) -> Result<String> {
+    let line = match action {
+        Action::Status => control::status(env, folder).word(),
+        Action::Start => {
             let was_suspended = folder.is_suspended();
-            let exe = roomy_core::env::own_program()
-                .map_err(|e| Error::new(format!("cannot locate the roomy program: {e}")))?;
+            let exe = roomy_core::env::own_program().map_err(|e| err!("cannot locate the roomy program: {e}"))?;
             control::start(env, folder, &exe)?;
-            return Ok(Some(if was_suspended { "running (continued from saved state)" } else { "running" }.to_owned()));
+            if was_suspended { "running (continued from saved state)" } else { "running" }
         }
-        "discard-state" => {
+        Action::DiscardState => {
             if control::status(env, folder) != State::Suspended {
-                return Err(Error::new("the virtual machine is not suspended; there is no saved state to discard"));
+                return Err(err!("the virtual machine is not suspended; there is no saved state to discard"));
             }
             folder.discard_saved_state()?;
-            return Ok(Some("off (saved state discarded)".to_owned()));
+            "off (saved state discarded)"
         }
-        "add" => {
+        Action::Add => {
             let added = library::add(&library::default_path()?, folder.dir())?;
-            return Ok(Some(if added { "added to the library" } else { "already in the library" }.to_owned()));
+            if added { "added to the library" } else { "already in the library" }
         }
-        "forget" => {
+        Action::Forget => {
             let listed = library::forget(&library::default_path()?, folder.dir())?;
-            let line =
-                if listed { "removed from the library; its files were not touched" } else { "not in the library" };
-            return Ok(Some(line.to_owned()));
+            if listed { "removed from the library; its files were not touched" } else { "not in the library" }
         }
-        "pause" => Request::Pause,
-        "resume" => Request::Resume,
-        "suspend" => Request::Suspend,
-        "shutdown" => Request::Shutdown,
-        "restart" => Request::Restart,
-        "force-off" => Request::ForceOff,
-        "force-restart" => Request::ForceRestart,
-        _ => return Ok(None),
+        Action::Ask(request) => {
+            let reply = control::request(env, folder, request)?;
+            return Ok(match reply.note {
+                Some(note) => format!("{}\nNote: {note}", reply.state.word()),
+                None => reply.state.word().to_owned(),
+            });
+        }
     };
-    let reply = control::request(env, folder, request)?;
-    Ok(Some(match reply.note {
-        Some(note) => format!("{}\nNote: {note}", reply.state.word()),
-        None => reply.state.word().to_owned(),
-    }))
+    Ok(line.to_owned())
 }
 
 fn create(args: &[String]) -> Result<String> {
@@ -98,7 +119,7 @@ fn create(args: &[String]) -> Result<String> {
     let mut parent: Option<PathBuf> = None;
     let mut args = args.iter();
     while let Some(flag) = args.next() {
-        let mut value = || args.next().cloned().ok_or_else(|| Error::new(format!("{flag} needs a value")));
+        let mut value = || args.next().cloned().ok_or_else(|| err!("{flag} needs a value"));
         match flag.as_str() {
             "--name" => new.name = value()?,
             "--in" => parent = Some(PathBuf::from(value()?)),
@@ -110,25 +131,13 @@ fn create(args: &[String]) -> Result<String> {
             "--from-disk" => new.existing_disk = Some(absolute(&value()?)?),
             "--gpu" => new.features.gpu_acceleration = true,
             "--no-network" => new.features.network = false,
-            "--share" => {
-                let value = value()?;
-                let (name, path) = value.split_once('=').ok_or_else(|| {
-                    Error::new("--share takes <name>=<folder>, for example --share projects=/home/me/projects")
-                })?;
-                new.shared_folders.push(SharedFolder { name: name.to_owned(), path: absolute(path)? });
-            }
-            "--forward" => {
-                let value = value()?;
-                let (host, guest) = value.split_once(':').ok_or_else(|| {
-                    Error::new("--forward takes <host port>:<guest port>, for example --forward 2222:22")
-                })?;
-                new.port_forwards.push(PortForward { host: number(flag, host)?, guest: number(flag, guest)? });
-            }
-            other => return Err(Error::new(format!("unknown option '{other}' for 'roomy vm create'"))),
+            "--share" => new.shared_folders.push(parse_share(&value()?)?),
+            "--forward" => new.port_forwards.push(parse_forward(flag, &value()?)?),
+            other => return Err(err!("unknown option '{other}' for 'roomy vm create'")),
         }
     }
     if new.name.trim().is_empty() {
-        return Err(Error::new("'roomy vm create' needs --name <name>"));
+        return Err(err!("'roomy vm create' needs --name <name>"));
     }
     let parent = match parent {
         Some(parent) => parent,
@@ -154,7 +163,7 @@ fn list() -> Result<String> {
         lines.push(line);
     }
     if lines.is_empty() {
-        lines.push("No virtual machines yet. Create one with: roomy vm create --name <name>".to_owned());
+        lines.push(format!("No virtual machines yet. Create one with: {} vm create --name <name>", roomy_command()));
     }
     Ok(lines.join("\n"))
 }
@@ -162,14 +171,16 @@ fn list() -> Result<String> {
 fn delete(args: &[String]) -> Result<String> {
     let (folders, flags): (Vec<&String>, Vec<&String>) = args.iter().partition(|a| !a.starts_with("--"));
     let ([dir], true) = (folders.as_slice(), flags.iter().all(|f| *f == "--yes")) else {
-        return Err(Error::new("usage: roomy vm delete <vm-folder> --yes"));
+        return Err(err!("usage: {} vm delete <vm-folder> --yes", roomy_command()));
     };
     let folder = Folder::open(Path::new(dir))?;
     if flags.is_empty() {
-        return Err(Error::new(format!(
-            "this permanently deletes the virtual machine in {}, including its disk.\nTo go ahead: roomy vm delete {dir} --yes\nTo only take it off the list: roomy vm forget {dir}",
-            folder.dir().display()
-        )));
+        return Err(err!(
+            "this permanently deletes the virtual machine in {}, including its disk.\nTo go ahead: {roomy} vm delete \
+             {dir} --yes\nTo only take it off the list: {roomy} vm forget {dir}",
+            folder.dir().display(),
+            roomy = roomy_command()
+        ));
     }
     let left = library::delete(&Env::system(), &library::default_path()?, &folder)?;
     Ok(if left.is_empty() {
@@ -182,7 +193,10 @@ fn delete(args: &[String]) -> Result<String> {
 /// `roomy vm set <vm-folder> [options]`: change settings, saying for each when it takes effect.
 fn set(args: &[String]) -> Result<String> {
     let Some((dir, options)) = args.split_first().filter(|(dir, _)| !dir.starts_with("--")) else {
-        return Err(Error::new("usage: roomy vm set <vm-folder> [--name <name>] [--cpus <n>] [--memory <MB>] ..."));
+        return Err(err!(
+            "usage: {} vm set <vm-folder> [--name <name>] [--cpus <n>] [--memory <MB>] ...",
+            roomy_command()
+        ));
     };
     let folder = Folder::open(Path::new(dir))?;
     let config = folder.load()?;
@@ -191,11 +205,11 @@ fn set(args: &[String]) -> Result<String> {
     let switch = |flag: &str, value: &str| match value {
         "on" => Ok(true),
         "off" => Ok(false),
-        other => Err(Error::new(format!("{flag} takes 'on' or 'off', not '{other}'"))),
+        other => Err(err!("{flag} takes 'on' or 'off', not '{other}'")),
     };
     let mut options = options.iter();
     while let Some(flag) = options.next() {
-        let value = options.next().cloned().ok_or_else(|| Error::new(format!("{flag} needs a value")))?;
+        let value = options.next().cloned().ok_or_else(|| err!("{flag} needs a value"))?;
         match flag.as_str() {
             "--name" => changes.name = Some(value),
             "--cpus" => changes.cpus = Some(number(flag, &value)?),
@@ -206,24 +220,19 @@ fn set(args: &[String]) -> Result<String> {
             "--clipboard" => changes.clipboard = Some(switch(flag, &value)?),
             "--microphone" => changes.microphone = Some(switch(flag, &value)?),
             "--share" => {
-                let (name, path) = value.split_once('=').ok_or_else(|| {
-                    Error::new("--share takes <name>=<folder>, for example --share projects=/home/me/projects")
-                })?;
-                shares.retain(|share| share.name != name);
-                shares.push(SharedFolder { name: name.to_owned(), path: absolute(path)? });
+                let share = parse_share(&value)?;
+                shares.retain(|existing| existing.name != share.name);
+                shares.push(share);
             }
             "--unshare" => {
                 let before = shares.len();
                 shares.retain(|share| share.name != value);
                 if shares.len() == before {
-                    return Err(Error::new(format!("there is no shared folder named '{value}'")));
+                    return Err(err!("there is no shared folder named '{value}'"));
                 }
             }
             "--forward" => {
-                let (host, guest) = value.split_once(':').ok_or_else(|| {
-                    Error::new("--forward takes <host port>:<guest port>, for example --forward 2222:22")
-                })?;
-                let forward = PortForward { host: number(flag, host)?, guest: number(flag, guest)? };
+                let forward = parse_forward(flag, &value)?;
                 forwards.retain(|existing| existing.host != forward.host);
                 forwards.push(forward);
             }
@@ -232,10 +241,10 @@ fn set(args: &[String]) -> Result<String> {
                 let before = forwards.len();
                 forwards.retain(|forward| forward.host != host);
                 if forwards.len() == before {
-                    return Err(Error::new(format!("port {host} of this computer is not forwarded")));
+                    return Err(err!("port {host} of this computer is not forwarded"));
                 }
             }
-            other => return Err(Error::new(format!("unknown option '{other}' for 'roomy vm set'"))),
+            other => return Err(err!("unknown option '{other}' for 'roomy vm set'")),
         }
     }
     changes.shared_folders = Some(shares);
@@ -262,16 +271,32 @@ fn set(args: &[String]) -> Result<String> {
 }
 
 fn default_vm_parent() -> Result<PathBuf> {
-    library::default_vm_parent().map_err(|e| Error::new(format!("{e}; pass --in <folder>")))
+    library::default_vm_parent().map_err(|e| err!("{e}; pass --in <folder>"))
+}
+
+/// The value of `--share`: `<name>=<folder>`.
+fn parse_share(value: &str) -> Result<SharedFolder> {
+    let (name, path) = value
+        .split_once('=')
+        .ok_or_else(|| err!("--share takes <name>=<folder>, for example --share projects=/home/me/projects"))?;
+    Ok(SharedFolder { name: name.to_owned(), path: absolute(path)? })
+}
+
+/// The value of `--forward`: `<host port>:<guest port>`.
+fn parse_forward(flag: &str, value: &str) -> Result<PortForward> {
+    let (host, guest) = value
+        .split_once(':')
+        .ok_or_else(|| err!("--forward takes <host port>:<guest port>, for example --forward 2222:22"))?;
+    Ok(PortForward { host: number(flag, host)?, guest: number(flag, guest)? })
 }
 
 fn number<T: std::str::FromStr>(flag: &str, text: &str) -> Result<T> {
-    text.parse().map_err(|_| Error::new(format!("{flag}: '{text}' is not a valid number")))
+    text.parse().map_err(|_| err!("{flag}: '{text}' is not a valid number"))
 }
 
 /// Settings store absolute paths, so the VM works from any directory.
 fn absolute(path: &str) -> Result<PathBuf> {
-    std::path::absolute(path).map_err(|e| Error::new(format!("cannot resolve {path}: {e}")))
+    std::path::absolute(path).map_err(|e| err!("cannot resolve {path}: {e}"))
 }
 
 fn report(outcome: Result<String>) -> ExitCode {

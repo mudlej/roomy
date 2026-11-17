@@ -21,16 +21,18 @@ use crate::host::{self, Firmware};
 use crate::process::{KillOnDrop, read_tail, spawn_logged, start_fresh_log, wait_until, wait_with_limit};
 use crate::qemu::{self, Launch, Sockets, ids};
 use crate::qmp::{Qmp, QmpError};
+use crate::shares::{self, DaemonFailure};
+use crate::time::utc_timestamp_secs;
 use crate::vm::{self, Config, Folder};
-use crate::{Result, err, fdpass, shares};
+use crate::{Result, err, fdpass};
 use serde_json::json;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// How long a guest gets to shut down when the supervisor itself is told to stop.
 const STOP_GRACE: Duration = Duration::from_secs(60);
@@ -86,13 +88,10 @@ struct Supervisor {
     _lock: File,
 }
 
-/// A note attached to a successful reply.
-type Note = Option<String>;
-
 impl Supervisor {
     fn start(env: &Env, dir: &Path) -> Result<Supervisor> {
         let folder = Folder::open(dir)?;
-        let lock = lock_folder(&folder)?;
+        let lock = folder.try_lock()?.ok_or_else(|| err!("the virtual machine is already running"))?;
         folder.ensure_dirs()?;
         folder.clean_interrupted_state()?;
 
@@ -105,12 +104,8 @@ impl Supervisor {
             current.clone()
         };
 
-        let qemu_path = env
-            .find_program(host::QEMU_PROGRAM)
-            .ok_or_else(|| err!("QEMU is not installed (run: {} setup)", crate::env::roomy_command()))?;
-        let firmware = host::find_firmware(env).ok_or_else(|| {
-            err!("no UEFI firmware for virtual machines found (run: {} doctor)", crate::env::roomy_command())
-        })?;
+        let qemu_path = env.require(host::QEMU_PROGRAM)?;
+        let firmware = host::require_firmware(env)?;
         check_files(&folder, &mut config, &firmware, restoring)?;
 
         let runtime = RuntimeDir(control::prepare_runtime_dir(env, &folder)?);
@@ -124,11 +119,7 @@ impl Supervisor {
         let qemu_log = folder.log_dir().join("qemu.log");
         start_fresh_log(&qemu_log);
         // The card the window is drawn with if a window started this VM, else the one with the monitor.
-        let render_node = env
-            .render_node
-            .clone()
-            .or_else(|| host::display_gpu(env).map(|gpu| gpu.render_node))
-            .filter(|_| config.features.gpu_acceleration);
+        let render_node = env.vm_render_node().filter(|_| config.features.gpu_acceleration);
         if let Some(node) = &render_node {
             log(&format!("accelerated graphics on {}", node.display()));
         }
@@ -304,7 +295,7 @@ impl Supervisor {
         }
     }
 
-    fn reply(&self, ok: bool, error: Option<String>, note: Note) -> Reply {
+    fn reply(&self, ok: bool, error: Option<String>, note: Option<String>) -> Reply {
         Reply { ok, state: self.state, error, note, guest_agent: self.agent_seen }
     }
 
@@ -316,23 +307,20 @@ impl Supervisor {
         }
     }
 
-    fn set_network(&mut self, on: bool) -> Result<Note> {
+    fn set_network(&mut self, on: bool) -> Result<Option<String>> {
         self.command("set_link", json!({ "name": ids::NIC, "up": on }))?;
         self.config.features.network = on;
         self.record_running();
         Ok(None)
     }
 
-    fn grow_disk(&mut self, size_gb: u64) -> Result<Note> {
+    fn grow_disk(&mut self, size_gb: u64) -> Result<Option<String>> {
         let bytes = size_gb.checked_mul(1 << 30).ok_or_else(|| err!("that disk size is too large"))?;
         self.command("block_resize", json!({ "node-name": ids::DISK, "size": bytes }))?;
-        Ok(Some(
-            "The disk is larger now; the guest still has to grow its partition and file system to use the space."
-                .to_owned(),
-        ))
+        Ok(None)
     }
 
-    fn pause(&mut self) -> Result<Note> {
+    fn pause(&mut self) -> Result<Option<String>> {
         match self.state {
             State::Paused => Ok(None),
             State::Running => {
@@ -344,7 +332,7 @@ impl Supervisor {
         }
     }
 
-    fn resume(&mut self) -> Result<Note> {
+    fn resume(&mut self) -> Result<Option<String>> {
         match self.state {
             State::Running => Ok(None),
             State::Paused => {
@@ -357,7 +345,7 @@ impl Supervisor {
         }
     }
 
-    fn suspend(&mut self) -> Result<Note> {
+    fn suspend(&mut self) -> Result<Option<String>> {
         if !matches!(self.state, State::Running | State::Paused) {
             return Err(err!("cannot suspend while the virtual machine is {}", self.state.word()));
         }
@@ -396,9 +384,7 @@ impl Supervisor {
 
         // The state is safely on disk; the guest must not run any further.
         self.state = State::Suspended;
-        if self.qmp.execute("quit", None).is_err() {
-            let _ = self.qemu.0.kill();
-        }
+        self.quit_qemu();
         let _ = wait_with_limit(&mut self.qemu.0, Duration::from_secs(10));
         log("suspended to disk");
         Ok(None)
@@ -412,7 +398,7 @@ impl Supervisor {
         fs::rename(partial, &state).and_then(|()| vm::sync_parent(&state)).context("cannot store the saved state")
     }
 
-    fn shutdown(&mut self) -> Result<Note> {
+    fn shutdown(&mut self) -> Result<Option<String>> {
         match self.state {
             State::Paused => self.command("cont", json!({}))?,
             State::Running | State::Stopping => {}
@@ -423,18 +409,23 @@ impl Supervisor {
         Ok(None)
     }
 
-    fn force_off(&mut self) -> Result<Note> {
+    fn force_off(&mut self) -> Result<Option<String>> {
         self.state = State::Off;
-        if self.qmp.execute("quit", None).is_err() {
-            let _ = self.qemu.0.kill();
-        }
+        self.quit_qemu();
         if !matches!(wait_with_limit(&mut self.qemu.0, Duration::from_secs(5)), Ok(Some(_))) {
             let _ = self.qemu.0.kill();
         }
         Ok(None)
     }
 
-    fn restart(&mut self) -> Result<Note> {
+    /// Tells QEMU to exit at once, or makes it if it does not listen.
+    fn quit_qemu(&mut self) {
+        if self.qmp.execute("quit", None).is_err() {
+            let _ = self.qemu.0.kill();
+        }
+    }
+
+    fn restart(&mut self) -> Result<Option<String>> {
         match self.state {
             State::Paused => self.command("cont", json!({}))?,
             State::Running => {}
@@ -477,7 +468,7 @@ impl Supervisor {
     }
 
     /// Corrects the guest's clock after it has been stopped for a while.
-    fn sync_clock(&mut self) -> Note {
+    fn sync_clock(&mut self) -> Option<String> {
         match self.agent.sync_clock(&mut self.qmp) {
             ClockSync::Synced => None,
             ClockSync::AgentNotRunning => Some(
@@ -492,7 +483,7 @@ impl Supervisor {
 
     /// Makes a private connection to the guest's screen, sound and clipboard
     /// and leaves our end in `handoff` for the client that asked.
-    fn open_display(&mut self) -> Result<Note> {
+    fn open_display(&mut self) -> Result<Option<String>> {
         if self.state == State::Suspending {
             return Err(err!("the virtual machine is being suspended"));
         }
@@ -528,17 +519,6 @@ impl Drop for RuntimeDir {
     }
 }
 
-fn lock_folder(folder: &Folder) -> Result<File> {
-    let path = folder.lock_path();
-    let file =
-        File::options().create(true).append(true).open(&path).context(format!("cannot open {}", path.display()))?;
-    // SAFETY: flock on a descriptor we own; the lock is released when the file is closed.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(err!("the virtual machine is already running"));
-    }
-    Ok(file)
-}
-
 /// Verifies the files a launch needs, repairing what can safely be repaired.
 fn check_files(folder: &Folder, config: &mut Config, firmware: &Firmware, restoring: bool) -> Result<()> {
     let disk = folder.disk_path(config);
@@ -552,8 +532,7 @@ fn check_files(folder: &Folder, config: &mut Config, firmware: &Firmware, restor
         fs::copy(&firmware.vars_template, folder.firmware_vars())
             .context("cannot recreate the firmware variable store")?;
     }
-    if config.install_image.as_ref().is_some_and(|image| !image.is_file()) {
-        let image = config.install_image.take().expect("checked above");
+    if let Some(image) = config.install_image.take_if(|image| !image.is_file()) {
         if restoring {
             return Err(err!(
                 "the installation image {} is gone, but the suspended guest still has it attached",
@@ -583,21 +562,16 @@ fn start_share_daemons(env: &Env, folder: &Folder, config: &Config, sockets: &So
     let virtiofsd = host::find_virtiofsd(env).ok_or_else(|| {
         err!("shared folders need virtiofsd, which is not installed (run: {} setup)", crate::env::roomy_command())
     })?;
-    // SAFETY: getuid and getgid cannot fail.
-    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     for (index, share) in config.shared_folders.iter().enumerate() {
-        let socket = sockets.share(index);
         let log_path = folder.log_dir().join(format!("share-{}.log", share.name));
         start_fresh_log(&log_path);
-        let args = shares::virtiofsd_args(&socket, &share.path, uid, gid, shares::DEFAULT_GUEST_UID);
-        let mut daemon = KillOnDrop(
-            spawn_logged(&virtiofsd, &args, &log_path).context(format!("cannot run {}", virtiofsd.display()))?,
-        );
-        let up = wait_until(Duration::from_secs(8), || socket.exists() || !daemon.running());
-        if !up || !daemon.running() {
-            return Err(with_log(err!("shared folder '{}' could not be set up", share.name), &log_path));
+        match shares::start_daemon(&virtiofsd, &sockets.share(index), &share.path, &log_path) {
+            Ok(daemon) => daemons.push(daemon),
+            Err(DaemonFailure::CannotRun(e)) => return Err(err!("cannot run {}: {e}", virtiofsd.display())),
+            Err(DaemonFailure::DidNotStart) => {
+                return Err(with_log(err!("shared folder '{}' could not be set up", share.name), &log_path));
+            }
         }
-        daemons.push(daemon);
     }
     Ok(daemons)
 }
@@ -641,5 +615,5 @@ fn with_log(error: crate::Error, log_path: &Path) -> crate::Error {
 
 /// Supervisor log line; ends up in the VM folder's `logs/supervisor.log`.
 fn log(message: &str) {
-    eprintln!("{} roomy supervisor: {message}", crate::doctor::utc_timestamp_secs(std::time::SystemTime::now()));
+    eprintln!("{} roomy supervisor: {message}", utc_timestamp_secs(SystemTime::now()));
 }

@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag matches the version in Cargo.toml
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/prepare
+      - run: just check
+      - run: just appimage
+      - name: Start the AppImage
+        run: APPIMAGE_EXTRACT_AND_RUN=1 work/dist/roomy-x86_64.AppImage --version
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd work/dist
+          sha256sum roomy-x86_64.AppImage > SHA256SUMS
+          cat > notes.md <<NOTES
+          Download \`roomy-x86_64.AppImage\`, then:
+
+              chmod +x roomy-x86_64.AppImage
+              ./roomy-x86_64.AppImage doctor     # check this computer
+              ./roomy-x86_64.AppImage setup      # install what is missing
+              ./roomy-x86_64.AppImage            # open the window
+
+          The file runs on x86-64 distributions with glibc 2.39 or newer (2024 onwards). QEMU and
+          the window toolkit come from the distribution: \`setup\` installs them.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" roomy-x86_64.AppImage SHA256SUMS \
+            --title "roomy $VERSION" --notes-file notes.md --generate-notes --verify-tag

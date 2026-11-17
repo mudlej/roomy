@@ -3,6 +3,7 @@
 //! All host lookups go through [`Env`] so tests can point them at a fake
 //! filesystem root and a fake `PATH`.
 
+use crate::{Result, err, host};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -24,7 +25,7 @@ pub struct Env {
 impl Env {
     /// The real host.
     pub fn system() -> Env {
-        let search_path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+        let search_path = process_search_path();
         let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
@@ -52,17 +53,49 @@ impl Env {
 
     /// Files in a host directory, sorted by name. A missing directory is empty.
     pub fn list(&self, absolute_dir: &str) -> Vec<PathBuf> {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(self.path(absolute_dir))
-            .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-            .unwrap_or_default();
-        entries.sort();
-        entries
+        sorted_entries(&self.path(absolute_dir))
     }
 
     /// Finds a program on the search path.
     pub fn find_program(&self, name: &str) -> Option<PathBuf> {
         self.search_path.iter().map(|dir| dir.join(name)).find(|p| is_executable(p))
     }
+
+    /// Finds a program roomy cannot do without; the error tells the user how to install it.
+    pub fn require(&self, program: &str) -> Result<PathBuf> {
+        // QEMU's program name means little to most people.
+        let called = if program == host::QEMU_PROGRAM { "QEMU" } else { program };
+        self.find_program(program).ok_or_else(|| err!("{called} is not installed (run: {} setup)", roomy_command()))
+    }
+
+    /// The graphics card accelerated VMs are drawn on: the one the caller named, else the one
+    /// the desktop is shown with (see [`host::display_gpu`]).
+    pub fn vm_render_node(&self) -> Option<PathBuf> {
+        self.render_node.clone().or_else(|| host::display_gpu(self).map(|gpu| gpu.render_node))
+    }
+}
+
+/// Everything in a directory, sorted by name. A directory that cannot be read is empty.
+pub(crate) fn sorted_entries(dir: &Path) -> Vec<PathBuf> {
+    let mut entries: Vec<PathBuf> =
+        std::fs::read_dir(dir).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect()).unwrap_or_default();
+    entries.sort();
+    entries
+}
+
+/// The directories this process searches for programs (`PATH`).
+fn process_search_path() -> Vec<PathBuf> {
+    std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default()
+}
+
+/// A directory named by an environment variable, when it is set to an absolute path.
+pub(crate) fn dir_from_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute())
+}
+
+/// The user's home folder (`HOME`).
+pub(crate) fn home_dir() -> Result<PathBuf> {
+    dir_from_env("HOME").ok_or_else(|| err!("cannot tell where your home folder is (HOME is not set)"))
 }
 
 /// The program to start for another `roomy` process that must outlive this one, such as a VM's
@@ -95,9 +128,7 @@ pub fn roomy_command() -> &'static str {
     static COMMAND: OnceLock<String> = OnceLock::new();
     COMMAND.get_or_init(|| {
         let file = std::env::current_exe().ok().and_then(|exe| single_file(&exe));
-        let search_path: Vec<PathBuf> =
-            std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
-        command_for(file.as_deref(), &search_path)
+        command_for(file.as_deref(), &process_search_path())
     })
 }
 
@@ -135,6 +166,7 @@ pub fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDir;
 
     #[test]
     fn the_single_file_is_only_used_by_a_program_that_runs_from_it() {
@@ -153,7 +185,7 @@ mod tests {
 
     #[test]
     fn messages_name_a_command_the_user_can_actually_type() {
-        let dir = std::env::temp_dir().join(format!("roomy-command-{}", std::process::id()));
+        let dir = TempDir::new("command");
         let downloads = dir.join("My Downloads");
         std::fs::create_dir_all(&downloads).unwrap();
         let file = downloads.join("roomy-x86_64.AppImage");
@@ -161,10 +193,9 @@ mod tests {
 
         assert_eq!(command_for(None, &[]), "roomy");
         // Saved somewhere the shell does not search: only the whole path works, quoted where needed.
-        assert_eq!(command_for(Some(&file), std::slice::from_ref(&dir)), format!("'{}'", file.display()));
+        assert_eq!(command_for(Some(&file), &[dir.to_path_buf()]), format!("'{}'", file.display()));
         // Saved where the shell searches: its name is enough.
-        assert_eq!(command_for(Some(&file), &[dir.clone(), downloads.clone()]), "roomy-x86_64.AppImage");
+        assert_eq!(command_for(Some(&file), &[dir.to_path_buf(), downloads.clone()]), "roomy-x86_64.AppImage");
         assert_eq!(shell_word("/home/me/it's here"), r"'/home/me/it'\''s here'");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

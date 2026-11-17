@@ -5,9 +5,10 @@
 mod common;
 
 use common::FakeHost;
+use roomy_core::process::wait_until;
 use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 struct Cli<'a> {
     host: &'a FakeHost,
@@ -45,11 +46,8 @@ impl Cli<'_> {
     }
 
     fn wait_for_status(&self, vm: &str, wanted: &str) {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while self.ok(&["vm", "status", vm]) != wanted {
-            assert!(Instant::now() < deadline, "the VM never became {wanted}");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        let became = wait_until(Duration::from_secs(15), || self.ok(&["vm", "status", vm]) == wanted);
+        assert!(became, "the VM never became {wanted}");
     }
 }
 
@@ -124,7 +122,9 @@ fn mistakes_on_the_command_line_are_explained() {
     );
     let not_a_vm = cli.err(&["vm", "status", host.base.to_str().unwrap()]);
     assert!(not_a_vm.contains("is not a roomy virtual machine"), "{not_a_vm}");
-    assert_eq!(cli.run(&["vm", "frobnicate", "/tmp"]).status.code(), Some(1), "an unopenable folder is reported first");
+    let unknown = cli.run(&["vm", "frobnicate", "/tmp"]);
+    assert_eq!(unknown.status.code(), Some(2), "an unknown action is reported before the folder is looked at");
+    assert!(String::from_utf8_lossy(&unknown.stderr).starts_with("roomy: unknown action 'frobnicate' for 'roomy vm'"));
 }
 
 #[test]

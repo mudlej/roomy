@@ -20,21 +20,6 @@ pub enum Applies {
     NextBoot,
 }
 
-/// Which settings take effect at once on a running guest, and which wait.
-pub mod timing {
-    use super::Applies;
-    pub const NAME: Applies = Applies::Now;
-    pub const NETWORK: Applies = Applies::Now;
-    pub const CLIPBOARD: Applies = Applies::Now;
-    pub const MICROPHONE: Applies = Applies::Now;
-    pub const DISK_SIZE: Applies = Applies::Now;
-    pub const PROCESSORS: Applies = Applies::NextBoot;
-    pub const MEMORY: Applies = Applies::NextBoot;
-    pub const GPU_ACCELERATION: Applies = Applies::NextBoot;
-    pub const SHARED_FOLDERS: Applies = Applies::NextBoot;
-    pub const PORT_FORWARDS: Applies = Applies::NextBoot;
-}
-
 /// What to change; everything left at its default stays as it is.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Changes {
@@ -64,9 +49,7 @@ pub struct Applied {
 
 /// The size of the VM's disk as the guest sees it, in whole GB (rounded up).
 pub fn disk_gb(env: &Env, folder: &Folder, config: &Config) -> Result<u64> {
-    let qemu_img = env
-        .find_program("qemu-img")
-        .ok_or_else(|| err!("qemu-img is not installed (run: {} setup)", crate::env::roomy_command()))?;
+    let qemu_img = env.require("qemu-img")?;
     let bytes = vm::disk_virtual_size(&qemu_img, &folder.disk_path(config))?;
     Ok(bytes.div_ceil(1 << 30))
 }
@@ -141,9 +124,7 @@ pub fn apply(env: &Env, folder: &Folder, changes: &Changes) -> Result<Vec<Applie
         if running {
             control::request(env, folder, Request::GrowDisk { size_gb })?;
         } else {
-            let qemu_img = env
-                .find_program("qemu-img")
-                .ok_or_else(|| err!("qemu-img is not installed (run: {} setup)", crate::env::roomy_command()))?;
+            let qemu_img = env.require("qemu-img")?;
             let disk = folder.disk_path(&config);
             vm::run_tool(&qemu_img, &["resize", "-q", &disk.to_string_lossy(), &format!("{size_gb}G")])?;
         }

@@ -5,6 +5,7 @@
 //! for the answer, so [`AudioHost::capture_read`] must return at once.
 //! Where the sound actually goes is up to the [`AudioHost`]; see [`crate::pulse`].
 
+use crate::args::{arg, bytes};
 use gio::prelude::*;
 use glib::variant::Handle;
 use std::os::fd::OwnedFd;
@@ -153,19 +154,8 @@ pub(crate) async fn register(
     Ok(connections)
 }
 
-fn arg<T: glib::variant::FromVariant>(parameters: &glib::Variant, index: usize) -> Option<T> {
-    (index < parameters.n_children()).then(|| parameters.child_value(index).get()).flatten()
-}
-
-fn bytes(parameters: &glib::Variant, index: usize) -> Option<Vec<u8>> {
-    if index >= parameters.n_children() {
-        return None;
-    }
-    parameters.child_value(index).fixed_array::<u8>().ok().map(<[u8]>::to_vec)
-}
-
-fn format(p: &glib::Variant) -> Option<Format> {
-    Some(Format {
+fn format(p: &glib::Variant) -> Result<Format, String> {
+    Ok(Format {
         bits: arg(p, 1)?,
         signed: arg(p, 2)?,
         float: arg(p, 3)?,
@@ -176,7 +166,7 @@ fn format(p: &glib::Variant) -> Option<Format> {
     })
 }
 
-type Reply = Option<Option<glib::Variant>>;
+type Reply = Result<Option<glib::Variant>, String>;
 
 fn playback_call(host: &dyn AudioHost, method: &str, p: &glib::Variant) -> Reply {
     let id: u64 = arg(p, 0)?;
@@ -188,7 +178,7 @@ fn playback_call(host: &dyn AudioHost, method: &str, p: &glib::Variant) -> Reply
         "Write" => host.playback_data(id, bytes(p, 1)?),
         _ => {}
     }
-    Some(None)
+    Ok(None)
 }
 
 fn capture_call(host: &dyn AudioHost, method: &str, p: &glib::Variant) -> Reply {
@@ -203,9 +193,9 @@ fn capture_call(host: &dyn AudioHost, method: &str, p: &glib::Variant) -> Reply 
             let mut data = host.capture_read(id, size);
             data.truncate(size);
             let data = glib::Variant::array_from_fixed_array(&data[..]);
-            return Some(Some(glib::Variant::tuple_from_iter([data])));
+            return Ok(Some(glib::Variant::tuple_from_iter([data])));
         }
         _ => {}
     }
-    Some(None)
+    Ok(None)
 }

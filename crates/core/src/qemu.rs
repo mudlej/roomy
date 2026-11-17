@@ -208,8 +208,7 @@ pub fn default_machine(qemu: &Path) -> Result<String> {
 }
 
 fn parse_default_machine(machine_help: &str) -> Option<String> {
-    // Either "q35  Standard PC (...) (alias of pc-q35-11.1)" or, on some
-    // builds, the versioned line carries "(alias of q35)"-style info reversed.
+    // The alias's line reads "q35  Standard PC (Q35 + ICH9, 2009) (alias of pc-q35-11.1)".
     let line = machine_help.lines().find(|l| l.split_whitespace().next() == Some("q35"))?;
     let (_, rest) = line.split_once("(alias of ")?;
     Some(rest.split(')').next()?.trim().to_owned())
@@ -237,41 +236,23 @@ mod tests {
     use super::*;
     use crate::vm::{PortForward, SharedFolder, example_config};
 
+    use crate::test_support::TempDir;
+
     fn launch_args(config: &Config, restoring: bool) -> Vec<String> {
-        launch_args_on(config, restoring, None)
+        launch_args_on(config, restoring, None, None)
     }
 
-    thread_local! {
-        /// What the next VM folder's firmware variables file holds, if it is to have one.
-        static VARS_FILE: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
-    }
-
-    #[test]
-    fn the_firmware_variables_keep_the_format_they_were_made_in() {
-        let config = example_config();
-        let vars_format = |content: Option<&[u8]>| {
-            VARS_FILE.with(|vars| vars.replace(content.map(<[u8]>::to_vec)));
-            let args = launch_args(&config, false);
-            VARS_FILE.with(|vars| vars.replace(None));
-            let drive = args.iter().find(|arg| arg.starts_with("if=pflash,unit=1")).unwrap().clone();
-            drive.split(',').find_map(|part| part.strip_prefix("format=").map(str::to_owned)).unwrap()
-        };
-        // The firmware installed here says "raw" (see `launch_args_on`); a VM brought from a
-        // distribution that ships qcow2 firmware is still opened as qcow2, and the other way round.
-        assert_eq!(vars_format(Some(b"QFI\xfb\0\0\0\x03 and so on")), "qcow2");
-        assert_eq!(vars_format(Some(&[0u8; 64])), "raw");
-        // No file yet (it is copied in before the first start): what the installed firmware says.
-        assert_eq!(vars_format(None), "raw");
-    }
-
-    fn launch_args_on(config: &Config, restoring: bool, render_node: Option<&Path>) -> Vec<String> {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("roomy-qemu-args-{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// The arguments for a VM folder whose firmware variables file holds `vars`, if it has one.
+    fn launch_args_on(
+        config: &Config,
+        restoring: bool,
+        render_node: Option<&Path>,
+        vars: Option<&[u8]>,
+    ) -> Vec<String> {
+        let dir = TempDir::new("qemu-args");
         std::fs::write(dir.join(crate::vm::CONFIG_FILE), config.to_toml()).unwrap();
         let folder = Folder::open(&dir).unwrap();
-        if let Some(vars) = VARS_FILE.with(|vars| vars.borrow().clone()) {
+        if let Some(vars) = vars {
             std::fs::write(folder.firmware_vars(), vars).unwrap();
         }
         let firmware = Firmware {
@@ -284,7 +265,6 @@ mod tests {
         let args =
             args(&Launch { config, folder: &folder, sockets: &sockets, firmware: &firmware, restoring, render_node });
         let dir_text = folder.dir().to_string_lossy().into_owned();
-        std::fs::remove_dir_all(&dir).unwrap();
         assert!(args.iter().all(|a| !a.is_empty()), "an empty argument would be read by QEMU as a disk image");
         args.into_iter().map(|a| a.replace(&dir_text, "<vm>")).collect()
     }
@@ -334,7 +314,7 @@ mod tests {
         let args = launch_args(&config, false);
         assert!(has(&args, "-display", "dbus,p2p=yes,audiodev=snd0,gl=on"));
         // On a computer with several graphics cards the chosen one is named, never left to QEMU.
-        let chosen = launch_args_on(&config, false, Some(Path::new("/dev/dri/renderD129")));
+        let chosen = launch_args_on(&config, false, Some(Path::new("/dev/dri/renderD129")), None);
         assert!(has(&chosen, "-display", "dbus,p2p=yes,audiodev=snd0,gl=on,rendernode=/dev/dri/renderD129"));
         assert!(has(&args, "-device", "virtio-vga-gl"));
         assert!(!has(&args, "-device", "virtio-vga"));
@@ -384,5 +364,21 @@ mod tests {
             pc-q35-11.1          Standard PC (Q35 + ICH9, 2009)\n";
         assert_eq!(parse_default_machine(help).as_deref(), Some("pc-q35-11.1"));
         assert_eq!(parse_default_machine("none  empty machine\n"), None);
+    }
+
+    #[test]
+    fn the_firmware_variables_keep_the_format_they_were_made_in() {
+        let config = example_config();
+        let vars_format = |content: Option<&[u8]>| {
+            let args = launch_args_on(&config, false, None, content);
+            let drive = args.iter().find(|arg| arg.starts_with("if=pflash,unit=1")).unwrap().clone();
+            drive.split(',').find_map(|part| part.strip_prefix("format=").map(str::to_owned)).unwrap()
+        };
+        // The firmware installed here says "raw" (see `launch_args_on`); a VM brought from a
+        // distribution that ships qcow2 firmware is still opened as qcow2, and the other way round.
+        assert_eq!(vars_format(Some(b"QFI\xfb\0\0\0\x03 and so on")), "qcow2");
+        assert_eq!(vars_format(Some(&[0u8; 64])), "raw");
+        // No file yet (it is copied in before the first start): what the installed firmware says.
+        assert_eq!(vars_format(None), "raw");
     }
 }

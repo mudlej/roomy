@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """roomy lab: drive the real `roomy` program against real QEMU and a real guest.
+Runs inside the Arch lab box (distrobox.ini) only.
 
 Builds roomy, creates a VM from the cached Arch cloud image, and walks it
 through its lifecycle (start, shared folder, pause, suspend, continue,
 restart, shut down, force off, plus a GPU-accelerated VM and a killed
 supervisor). Everything observed is written to work/lab/results/engine-<time>/.
+gui_check.py, gpu_check.py and probe.py import their shared helpers from here.
 
 Usage: just lab-engine        (about 6 minutes)
 Set ROOMY_LAB_KEEP=1 to keep the test VMs in work/lab/scratch/ afterwards.
@@ -25,15 +27,11 @@ REPO = HERE.parent
 # Everything a run downloads or writes lives under the checkout's work/ folder, which git ignores.
 DATA = REPO / "work" / "lab"
 TS = time.strftime("%Y%m%d-%H%M%S")
-OUT = DATA / "results" / f"engine-{TS}"
-WORK = DATA / "scratch" / f"engine-{TS}"
+OUT = WORK = None  # set by start_run()
 BASE_IMAGE = Path(os.environ.get("ROOMY_LAB_IMAGE") or DATA / "cache" / "Arch-Linux-x86_64-cloudimg.qcow2")
 # ROOMY_LAB_PROGRAM: another build of roomy, for dry runs of these scripts.
 ROOMY = Path(os.environ.get("ROOMY_LAB_PROGRAM") or REPO / "target" / "release" / "roomy")
 KEEP = os.environ.get("ROOMY_LAB_KEEP") == "1"
-
-# Lab VMs must not show up in (or disturb) the library of the person running this.
-os.environ["XDG_CONFIG_HOME"] = str(WORK / "config")
 
 REPORT = {"started": TS, "steps": []}
 VMS = []          # folders of every VM created, for cleanup
@@ -46,6 +44,69 @@ def log(msg):
     if _log_file:
         _log_file.write(line + "\n")
         _log_file.flush()
+
+
+def log_to(path):
+    """From now on, also append every log line to `path`."""
+    global _log_file
+    _log_file = open(path, "a")
+
+
+def link_latest(name, folder):
+    """Point work/lab/results/<name> at `folder`, the newest run of its kind."""
+    latest = folder.parent / name
+    with contextlib.suppress(OSError):
+        if latest.is_symlink():
+            latest.unlink()
+        latest.symlink_to(folder.name)
+
+
+def start_run(kind):
+    """Begin a run: results go to work/lab/results/<kind>-<time>, scratch files to work/lab/scratch/<kind>-<time>."""
+    global OUT, WORK
+    OUT = DATA / "results" / f"{kind}-{TS}"
+    WORK = DATA / "scratch" / f"{kind}-{TS}"
+    OUT.mkdir(parents=True)
+    WORK.mkdir(parents=True)
+    # Lab VMs must not show up in (or disturb) the library of the person running this.
+    os.environ["XDG_CONFIG_HOME"] = str(WORK / "config")
+    log_to(OUT / "run.log")
+    link_latest(f"latest-{kind}", OUT)
+    log(f"results: {OUT}")
+
+
+def step_note(s):
+    return str(s.get("error") or s["data"].get("why") or "")[:150]
+
+
+def finish_run(title, stop=None, note=step_note, extra_lines=()):
+    """End a run, whatever happened: force off its VMs and keep their logs, call `stop` for anything else
+    still running, write report.json and SUMMARY.txt (`note(step)` follows each step's name), and remove
+    the scratch folder unless ROOMY_LAB_KEEP=1."""
+    for folder in VMS:
+        with contextlib.suppress(Exception):
+            roomy("vm", "force-off", folder, timeout=20)
+            collect_logs(folder, folder.name)
+    if stop:
+        stop()
+    time.sleep(1)
+    REPORT["processes_at_end"] = processes()
+    REPORT["finished"] = time.strftime("%Y%m%d-%H%M%S")
+    save()
+    lines = [title, ""]
+    for s in REPORT["steps"]:
+        verdict = {True: "ok", False: "FAILED"}.get(s["ok"], "interrupted")
+        lines.append(f"{verdict:11} {s.get('secs', ''):>7}  {s['name']}  {note(s)}")
+    failed = sum(1 for s in REPORT["steps"] if s["ok"] is False)
+    lines += ["", f"{len(REPORT['steps']) - failed} ok, {failed} failed", *extra_lines,
+              f"processes left at the end: {REPORT['processes_at_end'] or 'none'}"]
+    (OUT / "SUMMARY.txt").write_text("\n".join(lines) + "\n")
+    print("\n" + "\n".join(lines))
+    if not KEEP:
+        shutil.rmtree(WORK, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            (DATA / "scratch").rmdir()
+    log(f"done. Everything is in {OUT}")
 
 
 def save():
@@ -103,14 +164,28 @@ def expect(d, condition, why):
         d.setdefault("why", why)
 
 
+def ssh_command(key, port, cmd):
+    """The ssh command line that runs `cmd` in a lab guest whose SSH port is forwarded to `port` here."""
+    return ["ssh", "-F", "/dev/null", "-i", key, "-p", str(port), "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+            "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR", "arch@127.0.0.1", cmd]
+
+
+def clock_lag(guest):
+    """Seconds the guest's wall clock is behind this computer's (includes about 0.1s of SSH latency)."""
+    host = time.time()
+    try:
+        return round(host - float(guest.g("date +%s.%N").split()[0]), 2)
+    except (ValueError, IndexError):
+        return None
+
+
 class Guest:
     def __init__(self, folder, port, key):
         self.folder, self.port, self.key = str(folder), port, key
 
     def ssh(self, cmd, timeout=30, input=None):
-        return sh(["ssh", "-F", "/dev/null", "-i", self.key, "-p", str(self.port), "-o", "StrictHostKeyChecking=no",
-                   "-o", "UserKnownHostsFile=/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
-                   "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR", "arch@127.0.0.1", cmd], timeout=timeout, input=input)
+        return sh(ssh_command(self.key, self.port, cmd), timeout=timeout, input=input)
 
     def g(self, cmd, timeout=30):
         r = self.ssh(cmd + " 2>&1", timeout=timeout)
@@ -143,13 +218,6 @@ class Guest:
             time.sleep(0.25)
         raise TimeoutError(f"status stayed '{self.status()}', expected '{wanted}'")
 
-    def clock_lag(self):
-        host = time.time()
-        try:
-            return round(host - float(self.g("date +%s.%N").split()[0]), 2)
-        except (ValueError, IndexError):
-            return None
-
     def boot_id(self):
         """Changes on every boot of the guest and never while it runs."""
         return self.g("cat /proc/sys/kernel/random/boot_id").strip() or None
@@ -178,17 +246,36 @@ def free_port():
         return s.getsockname()[1]
 
 
-def create_vm(name, key_pub, extra=()):
-    """Create a VM from the cloud image with a cloud-init seed that installs our SSH key."""
-    seed_dir = WORK / f"seed-{name}"
-    seed_dir.mkdir(parents=True)
-    (seed_dir / "user-data").write_text(f"#cloud-config\nssh_pwauth: false\nssh_authorized_keys:\n  - {key_pub}\n")
-    (seed_dir / "meta-data").write_text(f"instance-id: roomy-{name}-{TS}\nlocal-hostname: {name}\n")
-    seed = WORK / f"seed-{name}.iso"
-    r = sh(["xorriso", "-as", "mkisofs", "-output", str(seed), "-volid", "CIDATA", "-joliet", "-rock",
-            str(seed_dir / "user-data"), str(seed_dir / "meta-data")])
+def require_base_image():
+    if not BASE_IMAGE.is_file():
+        raise RuntimeError(f"{BASE_IMAGE} is missing: run just lab-probe once first (it downloads the guest image)")
+
+
+def new_key(folder):
+    """A new SSH key pair in `folder` for reaching lab guests: (private key path, public key)."""
+    key = str(Path(folder) / "id_ed25519")
+    r = sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "roomy-lab", "-f", key])
+    if r["rc"] != 0:
+        raise RuntimeError(f"ssh-keygen failed: {r}")
+    return key, Path(key + ".pub").read_text().strip()
+
+
+def make_seed(iso, hostname, key_pub):
+    """Write a cloud-init seed image at `iso` that names the guest and lets `key_pub` in over SSH."""
+    folder = Path(iso).with_suffix("")
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "user-data").write_text(f"#cloud-config\nssh_pwauth: false\nssh_authorized_keys:\n  - {key_pub}\n")
+    (folder / "meta-data").write_text(f"instance-id: {hostname}-{TS}\nlocal-hostname: {hostname}\n")
+    r = sh(["xorriso", "-as", "mkisofs", "-output", str(iso), "-volid", "CIDATA", "-joliet", "-rock",
+            str(folder / "user-data"), str(folder / "meta-data")])
     if r["rc"] != 0:
         raise RuntimeError(f"xorriso failed: {r}")
+
+
+def create_vm(name, key_pub, extra=()):
+    """Create a VM from the cloud image with a cloud-init seed that installs our SSH key."""
+    seed = WORK / f"seed-{name}.iso"
+    make_seed(seed, name, key_pub)
     port = free_port()
     r = roomy("vm", "create", "--name", name, "--in", WORK / "vms", "--os", "archlinux", "--cpus", 4, "--memory", 4096,
               "--disk", 20, "--from-disk", BASE_IMAGE, "--iso", seed, "--forward", f"{port}:22", *extra)
@@ -255,14 +342,14 @@ def main_vm_checks(key, key_pub):
                "the shared folder did not work in both directions")
 
     with step("main:pause-resume") as d:
-        d["lag_before_s"] = vm.clock_lag()
+        d["lag_before_s"] = clock_lag(vm)
         d["pause"] = roomy("vm", "pause", vm.folder)
         d["status_paused"] = vm.status()
         d["ssh_while_paused_rc"] = vm.ssh("true", timeout=4)["rc"]
         time.sleep(6)
         d["resume"] = roomy("vm", "resume", vm.folder)
         d["status_resumed"] = vm.status()
-        d["lag_after_resume_s"] = vm.clock_lag()
+        d["lag_after_resume_s"] = clock_lag(vm)
         expect(d, d["status_paused"] == "paused" and d["status_resumed"] == "running", "pause/resume states are wrong")
         expect(d, d["lag_after_resume_s"] is not None and abs(d["lag_after_resume_s"]) < 1.5,
                "the guest clock was not corrected after resume")
@@ -292,7 +379,7 @@ def main_vm_checks(key, key_pub):
             d["ssh_after_s"] = vm.wait_ssh(timeout=120)
             d["start_to_ssh_s"] = round(d["start"]["secs"] + d["ssh_after_s"], 2)
             d["uptime_after"] = vm.uptime()
-            d["lag_after_continue_s"] = vm.clock_lag()
+            d["lag_after_continue_s"] = clock_lag(vm)
             d["ticker"] = vm.g("systemctl is-active roomy-ticker; wc -l < /var/tmp/ticks")
             d["share_after"] = vm.g("cat /mnt/labshare/from-host.txt && echo cycle-%d >> /mnt/labshare/from-guest.txt && echo share-ok" % cycle)
             d["state_dir_after"] = sh(["ls", "-la", str(folder / "state")])["out"]
@@ -377,16 +464,7 @@ def gpu_vm_checks(key, key_pub):
 
 
 def main():
-    global _log_file
-    OUT.mkdir(parents=True)
-    WORK.mkdir(parents=True)
-    _log_file = open(OUT / "run.log", "a")
-    latest = DATA / "results" / "latest-engine"
-    with contextlib.suppress(OSError):
-        if latest.is_symlink():
-            latest.unlink()
-        latest.symlink_to(OUT.name)
-    log(f"results: {OUT}")
+    start_run("engine")
     try:
         with step("build") as d:
             d["cargo"] = sh("cargo build --release 2>&1 | tail -n 3", timeout=900)
@@ -399,44 +477,17 @@ def main():
         if not all(s["ok"] for s in REPORT["steps"]) and os.environ.get("ROOMY_LAB_IGNORE_DOCTOR") != "1":
             return
         with step("prepare") as d:
-            if not BASE_IMAGE.is_file():
-                raise RuntimeError(f"{BASE_IMAGE} is missing: run just lab-probe once first (it downloads the guest image)")
-            key = str(WORK / "id_ed25519")
-            r = sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "roomy-lab", "-f", key])
-            if r["rc"] != 0:
-                raise RuntimeError(f"ssh-keygen failed: {r}")
+            require_base_image()
+            key, key_pub = new_key(WORK)
             d["work_filesystem"] = sh(["df", "-hT", str(WORK)])["out"]
         if REPORT["steps"][-1]["ok"]:
-            key_pub = Path(key + ".pub").read_text().strip()
             main_vm_checks(key, key_pub)
             gpu_vm_checks(key, key_pub)
     except KeyboardInterrupt:
         log("interrupted")
         REPORT["interrupted"] = True
     finally:
-        for folder in VMS:
-            with contextlib.suppress(Exception):
-                roomy("vm", "force-off", folder, timeout=20)
-                collect_logs(folder, folder.name)
-        time.sleep(1)
-        REPORT["processes_at_end"] = processes()
-        REPORT["finished"] = time.strftime("%Y%m%d-%H%M%S")
-        save()
-        lines = [f"roomy engine check {TS}", ""]
-        for s in REPORT["steps"]:
-            verdict = {True: "ok", False: "FAILED"}.get(s["ok"], "interrupted")
-            note = s.get("error") or s["data"].get("why") or ""
-            lines.append(f"{verdict:11} {s.get('secs', ''):>7}  {s['name']}  {str(note)[:150]}")
-        failed = sum(1 for s in REPORT["steps"] if s["ok"] is False)
-        lines += ["", f"{len(REPORT['steps']) - failed} ok, {failed} failed",
-                  f"processes left at the end: {REPORT['processes_at_end'] or 'none'}"]
-        (OUT / "SUMMARY.txt").write_text("\n".join(lines) + "\n")
-        print("\n" + "\n".join(lines))
-        if not KEEP:
-            shutil.rmtree(WORK, ignore_errors=True)
-            with contextlib.suppress(OSError):
-                (DATA / "scratch").rmdir()
-        log(f"done. Everything is in {OUT}")
+        finish_run(f"roomy engine check {TS}")
 
 
 if __name__ == "__main__":

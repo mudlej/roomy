@@ -12,8 +12,8 @@ script. Keys:
   migrate_fail    saving state fails with this message
   incoming_fail   loading state fails with this message
   agent           true: a guest agent is listening and answers requests
-  ignore_powerdown  true: the guest ignores the power button
   status          override for query-status once running (e.g. "io-error")
+  display_fail    opening a display connection fails with this message
 
 Everything it is asked is appended to `fake-qemu.log` next to this script:
 one line per start ("start <argv>"), per QMP command ("qmp <name> <args>")
@@ -87,6 +87,7 @@ if agent_path:
 
 status = "inmigrate" if "-incoming" in args else ("prelaunch" if "-S" in args else "running")
 migration = {}
+display_clients = []  # held so that each display connection stays open, as it does with QEMU
 server = socket.socket(socket.AF_UNIX)
 server.bind(socket_path("unix:"))
 server.listen(1)
@@ -160,14 +161,13 @@ while True:
                 # Stands in for QEMU starting to talk D-Bus on the socket it was given.
                 client = socket.socket(fileno=named_fds.pop(arguments["fdname"]))
                 client.sendall(b"FAKE DISPLAY " + arguments["protocol"].encode() + b"\n")
-                display_clients = globals().setdefault("display_clients", [])
                 display_clients.append(client)
             elif name == "closefd":
                 os.close(named_fds.pop(arguments["fdname"]))
             elif name == "send-key":
                 send({"event": "RESET", "data": {"guest": True}, "timestamp": {}})
             send({"return": result, "id": request["id"]})
-            if name == "quit" or (name == "system_powerdown" and not c.get("ignore_powerdown")):
+            if name in ("quit", "system_powerdown"):
                 os._exit(0)
     except OSError:
         pass

@@ -36,17 +36,8 @@ pub fn send_with_fd(stream: &UnixStream, bytes: &[u8], fd: BorrowedFd<'_>) -> io
         (*header).cmsg_len = libc::CMSG_LEN(FD_SIZE) as _;
         std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>(), fd.as_raw_fd());
     }
-    let sent = loop {
-        // SAFETY: msg points at buffers that outlive the call.
-        let n = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, libc::MSG_NOSIGNAL) };
-        if n >= 0 {
-            break n as usize;
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    };
+    // SAFETY: msg points at buffers that outlive the call.
+    let sent = retry_interrupted(|| unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, libc::MSG_NOSIGNAL) })?;
     let mut rest = stream;
     rest.write_all(&bytes[sent..])
 }
@@ -62,17 +53,9 @@ pub fn recv_with_fd(stream: &UnixStream, buf: &mut [u8]) -> io::Result<(usize, O
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast();
     msg.msg_controllen = size_of::<ControlBuffer>() as _;
-    let received = loop {
-        // SAFETY: msg points at buffers that outlive the call.
-        let n = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC) };
-        if n >= 0 {
-            break n as usize;
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    };
+    // SAFETY: msg points at buffers that outlive the call.
+    let received =
+        retry_interrupted(|| unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC) })?;
 
     let mut first = None;
     // SAFETY: the kernel filled the control buffer; the CMSG macros walk it within msg_controllen.
@@ -92,6 +75,20 @@ pub fn recv_with_fd(stream: &UnixStream, buf: &mut [u8]) -> io::Result<(usize, O
         }
     }
     Ok((received, first))
+}
+
+/// Makes a system call that returns a byte count, again for as long as a signal interrupts it.
+fn retry_interrupted(mut call: impl FnMut() -> isize) -> io::Result<usize> {
+    loop {
+        let n = call();
+        if n >= 0 {
+            return Ok(n as usize);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 #[cfg(test)]

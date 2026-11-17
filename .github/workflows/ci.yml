@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Ubuntu 24.04 has the oldest GTK (4.14) and libadwaita (1.5) roomy supports, and its glibc
+    # (2.39) is the oldest the AppImage built here will run on.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare
+      - run: just check
+      - run: just appimage
+      - name: Start the AppImage
+        run: APPIMAGE_EXTRACT_AND_RUN=1 work/dist/roomy-x86_64.AppImage --version
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: roomy-x86_64.AppImage
+          path: work/dist/roomy-x86_64.AppImage
+          if-no-files-found: error
+
+  minimum-rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare
+        with:
+          rust: "1.92.0"
+      - run: cargo check --workspace --all-targets --locked

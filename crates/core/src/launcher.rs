@@ -6,6 +6,7 @@
 //! the window has no icon and roomy is not in the menu. So a single-file roomy
 //! keeps an entry of its own in the user's data folder, pointing at the file.
 
+use crate::env::{dir_from_env, home_dir};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -20,9 +21,8 @@ const OURS: &str = "X-Roomy-SingleFile=true";
 /// Makes the user's application menu lead to the single file `file`, following the usual
 /// environment variables for where such entries live.
 pub fn keep_for_user(file: &Path) -> io::Result<()> {
-    let absolute = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute());
-    let data_home = absolute("XDG_DATA_HOME")
-        .or_else(|| absolute("HOME").map(|home| home.join(".local/share")))
+    let data_home = dir_from_env("XDG_DATA_HOME")
+        .or_else(|| home_dir().ok().map(|home| home.join(".local/share")))
         .ok_or_else(|| io::Error::other("no home folder"))?;
     let system = match std::env::var_os("XDG_DATA_DIRS").filter(|dirs| !dirs.is_empty()) {
         Some(dirs) => std::env::split_paths(&dirs).collect(),
@@ -96,17 +96,11 @@ fn write_if_different(path: &Path, content: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("roomy-launcher-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::test_support::TempDir;
 
     #[test]
     fn the_menu_entry_follows_the_file_and_brings_the_icon() {
-        let dir = scratch("follows");
+        let dir = TempDir::new("launcher");
         let (home, system) = (dir.join("home"), vec![dir.join("usr/share")]);
         let entry = home.join("applications/com.mudlej.Roomy.desktop");
         let icon = home.join("icons/hicolor/scalable/apps/com.mudlej.Roomy.svg");
@@ -123,12 +117,11 @@ mod tests {
         let text = std::fs::read_to_string(&entry).unwrap();
         assert!(text.contains("\nExec=\"/opt/my apps/roomy\"\n"), "{text}");
         assert!(!text.contains("Downloads"), "{text}");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn an_installed_roomy_or_an_entry_of_the_users_own_is_left_alone() {
-        let dir = scratch("alone");
+        let dir = TempDir::new("launcher");
         let (home, system) = (dir.join("home"), vec![dir.join("usr/share")]);
         let entry = home.join("applications/com.mudlej.Roomy.desktop");
         let file = Path::new("/home/me/roomy.AppImage");
@@ -144,7 +137,6 @@ mod tests {
         std::fs::write(&packaged, "[Desktop Entry]\n").unwrap();
         keep(&home, &system, file).unwrap();
         assert!(!entry.exists());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

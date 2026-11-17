@@ -12,7 +12,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 /// What must be present on any distribution, in plain words. Shown when
-/// roomy cannot install packages itself.
+/// roomy cannot install packages itself. The versions are [`MIN_QEMU`] and
+/// [`crate::shares::MIN_VIRTIOFSD`].
 pub const REQUIRED_COMPONENTS: &[&str] = &[
     "QEMU 10.1 or newer for x86-64 (qemu-system-x86_64) with KVM support",
     "QEMU modules: D-Bus display, D-Bus audio, virtio-gpu and virtio-vga including their OpenGL variants",
@@ -155,14 +156,17 @@ const APT_INSTALL_UNATTENDED: &[&str] = &[
     "DPkg::Lock::Timeout=120",
 ];
 
+/// Where to find a QEMU new enough, for a Debian or Ubuntu release that has none.
+const NEW_ENOUGH_RELEASES: &str = "Ubuntu has a new enough QEMU from 26.04 on, Debian from 13 with backports.";
+
 /// Runs a program of this computer and gives back what it printed, or `None` if that failed.
 /// Only programs that change nothing are run through it.
 pub type Ask<'a> = &'a dyn Fn(&str, &[&str]) -> Option<String>;
 
 /// What to do about missing packages on the distribution described by `os`.
 ///
-/// The package lists come from each distribution's own package definitions. Only the Arch one
-/// has been run for real so far; `roomy doctor` afterwards is what says whether it worked.
+/// The package lists come from each distribution's own package definitions; `roomy doctor`
+/// afterwards is what says whether an installation worked.
 pub fn advice(env: &Env, os: &OsRelease, ask: Ask) -> Advice {
     if os.is_like("arch") {
         // Always together with a full update (-Syu). A rolling distribution's package sources only
@@ -194,10 +198,11 @@ pub fn advice(env: &Env, os: &OsRelease, ask: Ask) -> Advice {
         if env.path("/run/ostree-booted").exists() {
             return Advice::ByHand(format!(
                 "This is an image-based system: packages are added to the system image and become available after \
-                 a restart.\n  sudo rpm-ostree install --idempotent {}\nThen restart the computer and run 'roomy \
+                 a restart.\n  sudo rpm-ostree install --idempotent {}\nThen restart the computer and run '{} \
                  doctor'. Alternatively, use roomy inside a toolbox or distrobox container, where it can install \
                  what it needs itself.",
-                FEDORA.join(" ")
+                FEDORA.join(" "),
+                roomy_command()
             ));
         }
         return Advice::Install(
@@ -213,10 +218,11 @@ pub fn advice(env: &Env, os: &OsRelease, ask: Ask) -> Advice {
         if transactional {
             return Advice::ByHand(format!(
                 "This is a transactional system: packages are added to a new snapshot and become available after a \
-                 restart.\n  sudo transactional-update pkg install {}\nThen restart the computer and run 'roomy \
+                 restart.\n  sudo transactional-update pkg install {}\nThen restart the computer and run '{} \
                  doctor'. Alternatively, use roomy inside a distrobox container, where it can install what it needs \
                  itself.",
-                SUSE.join(" ")
+                SUSE.join(" "),
+                roomy_command()
             ));
         }
         // zypper stops reading switches at the first package name, so "do not ask" has to come first.
@@ -247,14 +253,13 @@ pub fn advice(env: &Env, os: &OsRelease, ask: Ask) -> Advice {
 /// asked which version it would install before anything is proposed.
 fn apt_advice(env: &Env, os: &OsRelease, ask: Ask) -> Advice {
     let update = Step::new(&["apt-get", "update"], &["apt-get", "update"], &[]);
-    let install = apt_install;
     // Ubuntu's newer edition of the virtualization packages, where the user has opted into it:
     // asking for the ordinary names there would mean removing it.
     let newer_edition = env.path("/var/lib/dpkg/info/ubuntu-virt-hwe.list").exists();
     let qemu: Vec<String> =
         APT_QEMU.iter().map(|name| if newer_edition { format!("{name}-hwe") } else { (*name).to_owned() }).collect();
     let all: Vec<&str> = qemu.iter().map(String::as_str).chain(APT_OTHER.iter().copied()).collect();
-    let ordinary = InstallPlan::new(vec![update.clone(), install(&all, &["--no-upgrade"])]);
+    let ordinary = InstallPlan::new(vec![update.clone(), apt_install(&all, &["--no-upgrade"])]);
 
     let policy = ask("apt-cache", &["policy", if newer_edition { "qemu-system-x86-hwe" } else { "qemu-system-x86" }]);
     let Some(offered) = policy.as_deref().and_then(apt_candidate) else {
@@ -268,8 +273,8 @@ fn apt_advice(env: &Env, os: &OsRelease, ask: Ask) -> Advice {
         };
         return match (release, oldest) {
             (Some(release), Some(oldest)) if release < oldest => Advice::ByHand(format!(
-                "{} has a QEMU older than roomy needs ({MIN_QEMU} or newer), so installing it would not help.
-                 Ubuntu has a new enough QEMU from 26.04 on, Debian from 13 with backports.",
+                "{} has a QEMU older than roomy needs ({MIN_QEMU} or newer), so installing it would not help.\n\
+                 {NEW_ENOUGH_RELEASES}",
                 os.pretty_name
             )),
             _ => Advice::Install(ordinary),
@@ -284,8 +289,8 @@ fn apt_advice(env: &Env, os: &OsRelease, ask: Ask) -> Advice {
         return Advice::Install(
             InstallPlan::new(vec![
                 update,
-                install(APT_QEMU_FROM_BACKPORTS, &["-t", &suite]),
-                install(&other, &["--no-upgrade"]),
+                apt_install(APT_QEMU_FROM_BACKPORTS, &["-t", &suite]),
+                apt_install(&other, &["--no-upgrade"]),
             ])
             .note(format!(
                 "{} itself has QEMU {offered}; roomy needs {MIN_QEMU} or newer and takes it from {suite}. This \
@@ -307,17 +312,16 @@ fn apt_advice(env: &Env, os: &OsRelease, ask: Ask) -> Advice {
             roomy_command()
         ));
     } else {
-        text.push_str("\nUbuntu has a new enough QEMU from 26.04 on, Debian from 13 with backports.");
+        text.push('\n');
+        text.push_str(NEW_ENOUGH_RELEASES);
     }
     Advice::ByHand(text)
 }
 
 /// An `apt-get install` of `packages`, with `more` switches.
 fn apt_install(packages: &[&str], more: &[&str]) -> Step {
-    let line = |start: &[&str]| -> Vec<String> {
-        start.iter().chain(more).chain(packages).map(|word| (*word).to_owned()).collect()
-    };
-    Step { command: line(APT_INSTALL), unattended: line(APT_INSTALL_UNATTENDED) }
+    let rest: Vec<&str> = more.iter().chain(packages).copied().collect();
+    Step::new(APT_INSTALL, APT_INSTALL_UNATTENDED, &rest)
 }
 
 /// The version `apt-cache policy` says would be installed.
@@ -453,37 +457,35 @@ pub fn run_logged(commands: &[Vec<String>], log: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    use crate::test_support::TempDir;
+
     const NOBODY: Ask<'static> = &|_, _| None;
 
-    fn host(files: &[&str]) -> (Env, std::path::PathBuf) {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("roomy-setup-{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+    /// A host on which the named files exist, empty.
+    fn host(files: &[&str]) -> (Env, TempDir) {
+        let root = TempDir::new("setup");
         for file in files {
             let path = root.join(file.trim_start_matches('/'));
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "").unwrap();
         }
-        (Env::rooted(&root, Vec::new(), root.join("run")), root)
+        (Env::rooted(&*root, Vec::new(), root.join("run")), root)
     }
 
     fn advice_for(os_release: &str, files: &[&str], ask: Ask) -> Advice {
-        let (env, root) = host(files);
-        let advice = advice(&env, &OsRelease::parse(os_release), ask);
-        std::fs::remove_dir_all(root).unwrap();
-        advice
+        let (env, _root) = host(files);
+        advice(&env, &OsRelease::parse(os_release), ask)
     }
 
     /// A host on whose search path the named programs exist.
-    fn host_with_programs(names: &[&str]) -> (Env, std::path::PathBuf) {
+    fn host_with_programs(names: &[&str]) -> (Env, TempDir) {
         use std::os::unix::fs::PermissionsExt;
         let (_, root) = host(&[]);
         for name in names {
             std::fs::write(root.join(name), "").unwrap();
             std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        (Env::rooted(&root, vec![root.clone()], root.join("run")), root)
+        (Env::rooted(&*root, vec![root.to_path_buf()], root.join("run")), root)
     }
 
     #[test]
@@ -524,16 +526,14 @@ mod tests {
             lines(elevated(&plan, session(true, false, false), &both, passwordless)).unwrap(),
             [format!("{sudo} apt-get update"), format!("{sudo} apt-get install -y it's")]
         );
-        std::fs::remove_dir_all(root).unwrap();
 
-        let (only_sudo, root) = host_with_programs(&["sudo"]);
+        let (only_sudo, _root) = host_with_programs(&["sudo"]);
         assert_eq!(elevated(&plan, session(true, false, false), &only_sudo, NOBODY), None);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn an_installation_stops_at_the_first_failure_and_keeps_what_was_printed() {
-        let (_, root) = host(&[]);
+        let root = TempDir::new("setup");
         let log = root.join("setup.log");
         let shell = |script: &str| vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()];
 
@@ -544,7 +544,6 @@ mod tests {
             std::fs::read_to_string(&log).unwrap(),
             "$ /bin/sh -c echo one\none\n$ /bin/sh -c echo two >&2\ntwo\n$ /bin/sh -c echo three; exit 3\nthree\n"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn install(advice: Advice) -> InstallPlan {
@@ -706,12 +705,24 @@ mod tests {
             &[],
             NOBODY,
         ));
-        assert!(text.starts_with("Debian GNU/Linux 12 (bookworm) has a QEMU older than roomy needs"), "{text}");
+        assert_eq!(
+            text,
+            "Debian GNU/Linux 12 (bookworm) has a QEMU older than roomy needs (10.1.0 or newer), so installing it \
+             would not help.\nUbuntu has a new enough QEMU from 26.04 on, Debian from 13 with backports."
+        );
         by_hand(advice_for("ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n", &[], NOBODY));
         install(advice_for("ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.10\"\n", &[], NOBODY));
         install(advice_for("ID=debian\nVERSION_CODENAME=forky\n", &[], NOBODY));
         let none_yet = policy("qemu-system-x86:\n  Installed: (none)\n  Candidate: (none)\n  Version table:\n");
         assert_eq!(install(advice_for(DEBIAN_13, &[], &none_yet)).steps.len(), 2);
+    }
+
+    #[test]
+    fn the_plain_list_of_requirements_names_the_versions_roomy_checks_for() {
+        let short = |version: Version| format!("{}.{} or newer", version.major, version.minor);
+        let names = |program: &str| REQUIRED_COMPONENTS.iter().find(|line| line.starts_with(program)).unwrap();
+        assert!(names("QEMU ").contains(&short(MIN_QEMU)), "{}", names("QEMU "));
+        assert!(names("virtiofsd").contains(&short(crate::shares::MIN_VIRTIOFSD)), "{}", names("virtiofsd"));
     }
 
     #[test]

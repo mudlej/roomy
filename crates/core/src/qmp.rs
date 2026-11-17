@@ -163,6 +163,7 @@ fn io_error(e: io::Error) -> QmpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDir;
     use std::os::unix::net::UnixListener;
 
     /// A scripted QMP server: sends the greeting, then for each request line
@@ -192,32 +193,9 @@ mod tests {
         path
     }
 
-    /// A scratch directory that is removed again when the test ends.
-    struct TempDir(std::path::PathBuf);
-
-    impl std::ops::Deref for TempDir {
-        type Target = Path;
-        fn deref(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn tempdir(name: &str) -> TempDir {
-        let dir = std::env::temp_dir().join(format!("roomy-qmp-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        TempDir(dir)
-    }
-
     #[test]
     fn returns_results_and_collects_interleaved_events() {
-        let dir = tempdir("events");
+        let dir = TempDir::new("qmp-events");
         let path = serve(
             &dir,
             vec![
@@ -236,7 +214,7 @@ mod tests {
 
     #[test]
     fn command_errors_carry_qemus_description() {
-        let dir = tempdir("error");
+        let dir = TempDir::new("qmp-error");
         let path = serve(
             &dir,
             vec![
@@ -252,7 +230,7 @@ mod tests {
 
     #[test]
     fn a_silent_qemu_times_out() {
-        let dir = tempdir("timeout");
+        let dir = TempDir::new("qmp-timeout");
         let path = serve(&dir, vec![r#"{"return": {}, "id": $ID}"#]);
         let mut qmp = Qmp::connect(&path, Duration::from_secs(5), || true).unwrap();
         qmp.command_timeout = Duration::from_millis(100);
@@ -261,7 +239,7 @@ mod tests {
 
     #[test]
     fn connect_gives_up_early_when_qemu_has_exited() {
-        let dir = tempdir("gone");
+        let dir = TempDir::new("qmp-gone");
         let started = Instant::now();
         let result = Qmp::connect(&dir.join("never.sock"), Duration::from_secs(30), || false);
         assert!(matches!(result, Err(QmpError::Closed)));

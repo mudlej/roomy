@@ -22,7 +22,7 @@ pub const TEXT: &str = "text/plain;charset=utf-8";
 /// The ordinary copy-and-paste clipboard, as opposed to the mouse selection.
 pub(crate) const SELECTION: u32 = 0;
 /// Larger texts are not offered to the guest.
-pub const MAX_TEXT_BYTES: usize = 4 << 20;
+pub(crate) const MAX_TEXT_BYTES: usize = 4 << 20;
 
 const XML: &str = r#"
 <node>

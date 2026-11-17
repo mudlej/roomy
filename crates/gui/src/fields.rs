@@ -1,12 +1,96 @@
 //! Rows that the "New Virtual Machine" dialog and a VM's settings share.
 
+use crate::machine::SUSPEND_UNAVAILABLE_WITH_GPU;
 use adw::prelude::*;
 use gtk::gio;
-use roomy_core::catalog;
-use roomy_core::vm::{PortForward, SharedFolder};
+use roomy_core::env::Env;
+use roomy_core::vm::{Features, PortForward, SharedFolder};
+use roomy_core::{catalog, host};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
+
+/// This computer's processors, and its memory in whole GBs; at least one of each.
+pub fn host_size(env: &Env) -> (u32, u64) {
+    let cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
+    let memory_gb = (host::memory_mb(env).unwrap_or(8192) / 1024).max(1);
+    (cpus, memory_gb)
+}
+
+/// The frame of a dialog that edits a VM: Cancel and the button that goes ahead in the header
+/// bar, and room for messages over the page.
+pub struct Form {
+    pub dialog: adw::Dialog,
+    /// The button that goes ahead, such as Create or Apply.
+    pub confirm: gtk::Button,
+    toasts: adw::ToastOverlay,
+}
+
+impl Form {
+    pub fn new(title: &str, confirm: &str, page: &adw::PreferencesPage) -> Form {
+        let cancel = gtk::Button::with_label("Cancel");
+        let confirm = gtk::Button::with_label(confirm);
+        confirm.add_css_class("suggested-action");
+        let header = adw::HeaderBar::builder().show_start_title_buttons(false).show_end_title_buttons(false).build();
+        header.pack_start(&cancel);
+        header.pack_end(&confirm);
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_child(Some(page));
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&header);
+        toolbar.set_content(Some(&toasts));
+        let dialog = adw::Dialog::builder().title(title).content_width(600).content_height(760).child(&toolbar).build();
+        cancel.connect_clicked({
+            let dialog = dialog.clone();
+            move |_| {
+                dialog.close();
+            }
+        });
+        Form { dialog, confirm, toasts }
+    }
+
+    /// Something to tell the user about a problem, which stays until it is dismissed.
+    pub fn complainer(&self) -> impl Fn(&str) + Clone + 'static {
+        let toasts = self.toasts.clone();
+        move |message: &str| crate::toast(&toasts, message, 0)
+    }
+}
+
+/// A switch for each of a VM's features.
+pub struct FeatureSwitches {
+    pub gpu: adw::SwitchRow,
+    pub network: adw::SwitchRow,
+    pub clipboard: adw::SwitchRow,
+    pub microphone: adw::SwitchRow,
+}
+
+impl FeatureSwitches {
+    pub fn new(features: &Features) -> FeatureSwitches {
+        let switch = |title: &str, subtitle: &str, active: bool| {
+            adw::SwitchRow::builder().title(title).subtitle(subtitle).active(active).build()
+        };
+        FeatureSwitches {
+            gpu: switch("GPU acceleration", SUSPEND_UNAVAILABLE_WITH_GPU, features.gpu_acceleration),
+            network: switch("Network", "Internet access through this computer", features.network),
+            clipboard: switch(
+                "Clipboard sharing",
+                "Copy and paste text between the guest and this computer",
+                features.clipboard,
+            ),
+            microphone: switch("Microphone", "Let the guest hear this computer's microphone", features.microphone),
+        }
+    }
+
+    /// The features as the switches are set.
+    pub fn get(&self) -> Features {
+        Features {
+            gpu_acceleration: self.gpu.is_active(),
+            network: self.network.is_active(),
+            clipboard: self.clipboard.is_active(),
+            microphone: self.microphone.is_active(),
+        }
+    }
+}
 
 /// A number picked out of what there is: a slider over the whole range, and
 /// beside it a field for typing an exact value.

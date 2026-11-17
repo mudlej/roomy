@@ -17,6 +17,9 @@ pub mod settings;
 pub mod setup;
 pub mod shares;
 pub mod supervisor;
+#[cfg(test)]
+mod test_support;
+mod time;
 pub mod vm;
 
 /// Oldest QEMU roomy supports. Suspend-to-disk with the clipboard device

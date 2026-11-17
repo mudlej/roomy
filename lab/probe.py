@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """roomy lab: find out what this host's QEMU stack really does.
+Runs inside the Arch lab box (distrobox.ini) only.
 
 Runs a series of small experiments against the installed QEMU and writes
 everything it learns to work/lab/results/<timestamp>/ (report.json, SUMMARY.txt,
-per-process logs, screenshots). Nothing outside the lab/ directory is modified.
+per-process logs, screenshots). Apart from short-lived sockets in $XDG_RUNTIME_DIR,
+it writes nothing outside work/lab/.
 
 Usage:  just lab-probe                 run everything (about 10 minutes plus one image download)
         just lab-probe features        only the named VM stages (features, suspend, gpu);
                                  the environment check and the no-guest probes always run
-        just lab-probe followup        second-round questions (guest agent after restore, clock, resize modes)
+        just lab-probe followup        the guest agent and clock around pause, suspend and restore,
+                                 the display modes a resize request offers, and the guest's boot time
 
 Environment knobs:
   ROOMY_LAB_IMAGE    path to an Arch cloud image qcow2 (skips the download)
@@ -34,10 +37,9 @@ import traceback
 import urllib.request
 from pathlib import Path
 
+from engine_check import DATA, TS, clock_lag, free_port, link_latest, log, log_to, make_seed, new_key, ssh_command
+
 HERE = Path(__file__).resolve().parent
-# Everything a run downloads or writes lives under the checkout's work/ folder, which git ignores.
-DATA = HERE.parent / "work" / "lab"
-TS = time.strftime("%Y%m%d-%H%M%S")
 OUT = DATA / "results" / TS
 WORK = DATA / "scratch" / TS
 CACHE = DATA / "cache"
@@ -45,7 +47,6 @@ LOGS = OUT / "logs"
 
 IMAGE_URL = "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
 QEMU = "qemu-system-x86_64"
-GUEST_USER = "arch"
 GUEST_UID = 1000
 MEM_MB = int(os.environ.get("ROOMY_LAB_MEM_MB", "4096"))
 FILL_MB = int(os.environ.get("ROOMY_LAB_FILL_MB", "1536"))
@@ -58,17 +59,6 @@ F = {}            # facts and feature flags discovered along the way
 PROCS = []        # every child process we started
 TM = 1.0          # timeout multiplier, set in main()
 RUN = None        # short runtime dir for sockets, set in main()
-_run_log = None
-
-
-# ----------------------------------------------------------------- helpers
-
-def log(msg):
-    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
-    print(line, flush=True)
-    if _run_log:
-        _run_log.write(line + "\n")
-        _run_log.flush()
 
 
 def save_report():
@@ -183,14 +173,6 @@ def skip(name, why):
     log(f"--- {name}: skipped ({why})")
     save_report()
 
-
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-# --------------------------------------------------------------------- QMP
 
 class QMPError(Exception):
     pass
@@ -319,8 +301,6 @@ def qga(path, execute, args=None, timeout=8):
         s.close()
 
 
-# ------------------------------------------------------- host discovery
-
 def kvm_usable():
     try:
         os.close(os.open("/dev/kvm", os.O_RDWR))
@@ -418,8 +398,6 @@ MIGRATION_FLAG_SETS = [
 ]
 
 
-# ------------------------------------------------------ D-Bus display client
-
 def summarize_client(out_path, proc_result):
     s = {"client_rc": proc_result.get("rc"), "file": str(Path(out_path).relative_to(OUT))}
     if proc_result.get("rc") != 0:
@@ -462,8 +440,6 @@ def run_display_client(tag, qmp=None, bus=None, seconds=3.0, extras=False, resiz
             theirs.close()
     return summarize_client(out, r)
 
-
-# --------------------------------------------------------- no-guest probes
 
 def probe(name, extra=(), display="none", machine_extra="", hook=None, helpers=()):
     """Start a paused, diskless QEMU with some feature enabled and see whether it comes up."""
@@ -678,14 +654,6 @@ def stage_probes():
     return True
 
 
-# ---------------------------------------------------------------- the guest
-
-USER_DATA = """#cloud-config
-ssh_pwauth: false
-ssh_authorized_keys:
-  - {pubkey}
-"""
-
 UID_TEST = r"""#!/bin/bash
 # Tries ordinary file operations on each mount point as three different guest users.
 for m in "$@"; do
@@ -818,20 +786,9 @@ def stage_image():
             raise RuntimeError(f"qemu-img create failed: {r}")
         F["disk"] = str(disk)
 
-        key = f"{RUN}/id_ed25519"
-        r = sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "roomy-lab", "-f", key])
-        if r["rc"] != 0:
-            raise RuntimeError(f"ssh-keygen failed: {r}")
-        F["ssh_key"] = key
-        seed_dir = WORK / "seed"
-        seed_dir.mkdir(exist_ok=True)
-        (seed_dir / "user-data").write_text(USER_DATA.format(pubkey=open(key + ".pub").read().strip()))
-        (seed_dir / "meta-data").write_text(f"instance-id: roomy-lab-{TS}\nlocal-hostname: roomy-lab\n")
+        F["ssh_key"], key_pub = new_key(RUN)
         seed = WORK / "seed.iso"
-        r = sh(["xorriso", "-as", "mkisofs", "-output", str(seed), "-volid", "CIDATA", "-joliet", "-rock",
-                str(seed_dir / "user-data"), str(seed_dir / "meta-data")])
-        if r["rc"] != 0:
-            raise RuntimeError(f"xorriso failed: {r}")
+        make_seed(seed, "roomy-lab", key_pub)
         F["seed"] = str(seed)
         F["guest_ready"] = True
 
@@ -924,11 +881,7 @@ class VM:
         return self.proc is not None and self.proc.poll() is None
 
     def ssh(self, cmd, timeout=30, input=None):
-        argv = ["ssh", "-F", "/dev/null", "-i", F["ssh_key"], "-p", str(self.port),
-                "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "BatchMode=yes",
-                "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR",
-                f"{GUEST_USER}@127.0.0.1", cmd]
-        return sh(argv, timeout=timeout * TM, input=input)
+        return sh(ssh_command(F["ssh_key"], self.port, cmd), timeout=timeout * TM, input=input)
 
     def g(self, cmd, timeout=30):
         """Run a guest command and return its combined output as text."""
@@ -1037,8 +990,6 @@ def mount_shares(vm):
                              f"&& findmnt -no FSTYPE,OPTIONS /mnt/{s['tag']}")
     return out
 
-
-# ------------------------------------------------------------ stage: features
 
 def stage_features():
     shares = []
@@ -1190,8 +1141,6 @@ def stage_features():
         vm.quit()
 
 
-# ------------------------------------------------------------- stage: suspend
-
 def migration_setup(q, variant):
     caps = {"mapped-ram": "mapped-ram" in variant, "multifd": "multifd" in variant}
     q.cmd("migrate-set-capabilities", {"capabilities": [{"capability": k, "state": v} for k, v in caps.items()]})
@@ -1287,10 +1236,7 @@ def check_after_restore(vm, d, name):
     (OUT / f"holder-{name}.log").write_text(text)
     d["holder"] = holder_summary(text)
     d["holder_unit"] = vm.g("systemctl is-active roomy-holder")
-    host_now = time.time()
-    guest_now = vm.g("date +%s.%N")
-    with contextlib.suppress(ValueError):
-        d["guest_clock_behind_host_s"] = round(host_now - float(guest_now.split()[0]), 2)
+    d["guest_clock_behind_host_s"] = clock_lag(vm)
     d["guest"] = vm.g("uptime; systemctl is-system-running; ls -la /mnt/share0; "
                       "sudo dmesg | tail -n 25; sudo journalctl -p err -b --no-pager -n 15 -o cat")
     checks = d["holder"]["memory_intact_checks"]
@@ -1406,8 +1352,6 @@ def stage_suspend():
         log("suspend scenario did not fully succeed; trying the next variation")
 
 
-# ------------------------------------------------------------ stage: followup
-
 def timed(fn):
     t0 = time.monotonic()
     try:
@@ -1415,15 +1359,6 @@ def timed(fn):
     except Exception as e:
         result = {"error": repr(e)}
     return {"secs": round(time.monotonic() - t0, 2), "result": result}
-
-
-def clock_lag(vm):
-    """Seconds the guest wall clock is behind the host (includes about 0.1s of SSH latency)."""
-    host = time.time()
-    try:
-        return round(host - float(vm.g("date +%s.%N").split()[0]), 2)
-    except (ValueError, IndexError):
-        return None
 
 
 def agent_checks(vm, d):
@@ -1442,8 +1377,9 @@ def agent_checks(vm, d):
 
 
 def stage_followup():
-    """Second-round questions: why the guest agent stalled after a restore, what a pause does to the
-    guest clock, which display modes a resize request offers, and what the guest waits for at boot."""
+    """Whether the guest agent still answers after a restore, how far a pause sets the guest clock back,
+    which display modes a resize request offers, what the guest waits for at boot, and whether shutdown
+    after a restore is slow only when the agent was used."""
     display = f"dbus,addr={F['bus']}" if F.get("dbus_bus") else ("dbus,p2p=yes" if F.get("dbus_p2p") else "none")
     variant = "mapped-ram+multifd" if F.get("cap_mapped_ram") else "plain"
 
@@ -1521,8 +1457,6 @@ def stage_followup():
             os.unlink(state)
 
 
-# ----------------------------------------------------------------- stage: gpu
-
 def stage_gpu():
     working = F.get("gl_working") or []
     if not working:
@@ -1565,8 +1499,6 @@ def stage_gpu():
     finally:
         vm.quit()
 
-
-# ------------------------------------------------------------- stage: environment
 
 def stage_env():
     with step("env:host") as d:
@@ -1628,8 +1560,6 @@ def stage_env():
     return shutil.which(QEMU) is not None
 
 
-# --------------------------------------------------------------------- main
-
 def write_summary():
     lines = [f"roomy lab run {TS}", f"KVM: {F.get('kvm')}   machine: {F.get('machine')}   timeout multiplier: {TM}", ""]
     counts = {"ok": 0, "FAILED": 0, "skipped": 0}
@@ -1644,7 +1574,7 @@ def write_summary():
 
 
 def main():
-    global TM, RUN, _run_log
+    global TM, RUN
     wanted = [a for a in sys.argv[1:] if not a.startswith("-")]
     unknown = [a for a in wanted if a not in VM_STAGES + EXTRA_STAGES]
     if unknown or "-h" in sys.argv or "--help" in sys.argv:
@@ -1654,15 +1584,11 @@ def main():
 
     for p in (OUT, LOGS, OUT / "dbus", OUT / "screens", WORK):
         p.mkdir(parents=True, exist_ok=True)
-    _run_log = open(OUT / "run.log", "a")
+    log_to(OUT / "run.log")
     base = os.environ.get("XDG_RUNTIME_DIR")
     RUN = tempfile.mkdtemp(prefix="roomy-lab-", dir=base if base and os.access(base, os.W_OK) else "/tmp")
     atexit.register(cleanup)
-    latest = DATA / "results" / "latest"
-    with contextlib.suppress(OSError):
-        if latest.is_symlink():
-            latest.unlink()
-        latest.symlink_to(TS)
+    link_latest("latest", OUT)
     log(f"results: {OUT}")
 
     try:

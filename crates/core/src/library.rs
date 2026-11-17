@@ -5,9 +5,9 @@
 //! the folder, and deleting a VM's files removes only what roomy put there.
 
 use crate::control::{self, State};
-use crate::env::Env;
+use crate::env::{self, Env};
 use crate::error::Context;
-use crate::vm::{self, Folder};
+use crate::vm::{self, Folder, remove_if_present};
 use crate::{Result, err};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -26,19 +26,16 @@ struct Stored {
 /// The library file for the current user: `$XDG_CONFIG_HOME/roomy/library.toml`,
 /// by default `~/.config/roomy/library.toml`.
 pub fn default_path() -> Result<PathBuf> {
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok_or_else(|| err!("cannot tell where your home folder is (HOME is not set)"))?;
+    let config_home = match env::dir_from_env("XDG_CONFIG_HOME") {
+        Some(dir) => dir,
+        None => env::home_dir()?.join(".config"),
+    };
     Ok(config_home.join("roomy").join("library.toml"))
 }
 
 /// Where new VMs go unless the user picks another place: `~/VMs`.
 pub fn default_vm_parent() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("VMs"))
-        .ok_or_else(|| err!("cannot tell where your home folder is (HOME is not set)"))
+    Ok(env::home_dir()?.join("VMs"))
 }
 
 /// The folders in the library, in the order they were added. A library that
@@ -105,15 +102,13 @@ pub fn delete(env: &Env, library: &Path, folder: &Folder) -> Result<Vec<PathBuf>
     if !matches!(state, State::Off | State::Suspended) {
         return Err(err!("the virtual machine is {}; turn it off before deleting it", state.word()));
     }
-    // Holding the lock means no supervisor can start on a folder that is being taken apart.
-    let lock = fs::File::options().create(true).truncate(false).write(true).open(folder.lock_path());
-    if let Ok(lock) = &lock {
-        use std::os::fd::AsRawFd;
-        // SAFETY: flock on a descriptor we own.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(err!("the virtual machine is in use; turn it off before deleting it"));
-        }
-    }
+    // Holding the lock means no supervisor can start on a folder that is being taken apart. A
+    // lock file that cannot even be opened is no obstacle: then nothing can be running there.
+    let lock = match folder.try_lock() {
+        Ok(None) => return Err(err!("the virtual machine is in use; turn it off before deleting it")),
+        Ok(Some(lock)) => Some(lock),
+        Err(_) => None,
+    };
 
     let dir = folder.dir();
     let mut files = vec![folder.firmware_vars(), folder.lock_path(), folder.thumbnail()];
@@ -126,27 +121,13 @@ pub fn delete(env: &Env, library: &Path, folder: &Folder) -> Result<Vec<PathBuf>
     }
     // The settings file goes last: while it exists the folder is still recognisable as a VM.
     files.push(folder.config_path());
-    for directory in
-        [folder.saved_state().parent().map(Path::to_path_buf), Some(folder.log_dir())].into_iter().flatten()
-    {
-        match fs::remove_dir_all(&directory) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(err!("cannot delete {}: {e}", directory.display())),
-        }
-    }
-    for file in files {
-        match fs::remove_file(&file) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(err!("cannot delete {}: {e}", file.display())),
-        }
+    let directories = [folder.saved_state().parent().map(Path::to_path_buf), Some(folder.log_dir())];
+    for path in directories.into_iter().flatten().chain(files) {
+        remove_if_present(&path).context(format!("cannot delete {}", path.display()))?;
     }
     drop(lock);
 
-    let mut left: Vec<PathBuf> =
-        fs::read_dir(dir).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect()).unwrap_or_default();
-    left.sort();
+    let left = env::sorted_entries(dir);
     if left.is_empty() {
         fs::remove_dir(dir).context(format!("cannot remove the folder {}", dir.display()))?;
     }

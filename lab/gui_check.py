@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Lab run for roomy's window, against real QEMU, a real guest and a real desktop session.
+Runs inside the Arch lab box (distrobox.ini), except `distro` mode, which runs inside one of the other boxes there.
 
 Builds everything, then drives the real window through its test hooks (see
 crates/gui/src/lab.rs): pictures of the window at each stage, the keyboard
@@ -9,8 +10,8 @@ GPU-accelerated VM. Windows will appear on your screen for a few minutes;
 leave them alone while it runs.
 
 Everything is written to work/lab/results/gui-<timestamp>/ (also work/lab/results/latest-gui).
-Run inside the roomy-lab box:   just lab-gui
-A short run of only the newest checks (sound, microphone, settings, dialogs),
+Everything, about ten minutes:   just lab-gui
+A short run of the sound, microphone, settings and dialog checks,
 about two and a half minutes:   just lab-gui quick
 A short run of only the pointer and clipboard checks, which install a bare
 graphical session in the guest, about four minutes:   just lab-gui desktop
@@ -46,10 +47,7 @@ def distribution():
 # whatever distribution this is: roomy has to install what it needs here by itself, then pass the quick checks.
 DISTRO = "distro" in sys.argv[1:]
 KIND = f"distro-{distribution()}" if DISTRO else "gui"
-ec.OUT = OUT = ec.DATA / "results" / f"{KIND}-{TS}"
-ec.WORK = WORK = ec.DATA / "scratch" / f"{KIND}-{TS}"
 SINGLE_FILE = ec.REPO / "work" / "dist" / "roomy-x86_64.AppImage"
-os.environ["XDG_CONFIG_HOME"] = str(WORK / "config")
 GUI = ec.REPO / "target" / "release" / "roomy-gui"
 log, sh, roomy, step, expect = ec.log, ec.sh, ec.roomy, ec.step, ec.expect
 # A short run of one group of checks: "quick" (sound, microphone, settings, dialogs) or "desktop" (pointer, clipboard).
@@ -64,13 +62,13 @@ class Window:
 
     def __init__(self, name, vm=None, seconds=900, extra_env=None):
         self.name = name
-        self.dir = OUT / name
+        self.dir = ec.OUT / name
         self.dir.mkdir(parents=True)
         env = dict(os.environ, ROOMY_GUI_LAB=str(self.dir), ROOMY_GUI_LAB_SECONDS=str(seconds))
         env.update(extra_env or {})
         if vm:
             env["ROOMY_GUI_LAB_VM"] = str(vm)
-        self.output = open(OUT / f"{name}-window.log", "w")
+        self.output = open(ec.OUT / f"{name}-window.log", "w")
         # Started the way a user would: the roomy command opens the window.
         self.process = subprocess.Popen([str(ec.ROOMY)], env=env, stdout=self.output, stderr=subprocess.STDOUT)
 
@@ -126,7 +124,7 @@ class Window:
                 self.process.kill()
                 self.process.wait()
         self.output.close()
-        text = (OUT / f"{self.name}-window.log").read_text(errors="replace")
+        text = (ec.OUT / f"{self.name}-window.log").read_text(errors="replace")
         return {"exit_status": self.process.returncode, "output": text[-4000:],
                 "gtk_complaints": [line for line in text.splitlines() if "CRITICAL" in line or "WARNING" in line][:40],
                 "final_facts": self.facts()}
@@ -211,7 +209,7 @@ def main_vm(key, key_pub):
                    "text typed in the window did not arrive on the guest's console")
 
         if ONLY == "quick":
-            new_features(window, guest, folder)
+            feature_checks(window, guest, folder)
             return
         if ONLY == "desktop":
             desktop_features(window, guest, folder)
@@ -236,7 +234,7 @@ def main_vm(key, key_pub):
             thumbnail = Path(folder) / "thumbnail.png"
             d["thumbnail_bytes"] = thumbnail.stat().st_size if thumbnail.is_file() else None
             if thumbnail.is_file():
-                shutil.copy(thumbnail, OUT / "main" / "thumbnail.png")
+                shutil.copy(thumbnail, ec.OUT / "main" / "thumbnail.png")
             expect(d, d["thumbnail_bytes"], "the window saved no picture of the suspended VM's screen for the library")
             d["start"] = roomy("vm", "start", folder)
             d["window_saw_running_after_s"] = window.wait("running", lambda v: v.get("state") == "running", timeout=30)
@@ -251,7 +249,7 @@ def main_vm(key, key_pub):
             expect(d, "roomylabagain" in d["console"], "the keyboard did not work after continuing")
             expect(d, not d["vm"].get("problems"), "the window reported display problems")
 
-        new_features(window, guest, folder)
+        feature_checks(window, guest, folder)
         desktop_features(window, guest, folder)
 
         with step("main:follows-shutdown") as d:
@@ -377,7 +375,7 @@ def desktop_features(window, guest, folder):
         expect(d, not d["problems"], "the window reported display problems")
 
 
-def new_features(window, guest, folder):
+def feature_checks(window, guest, folder):
     """Sound, microphone, settings and the dialogs, on the running main VM."""
     with step("main:guest-agent-is-noticed") as d:
         d["after_s"] = window.wait("the guest agent", lambda v: (v.get("shows") or {}).get("guest_agent"), timeout=30)
@@ -528,11 +526,11 @@ def package():
         if not shutil.which("makepkg"):
             d["skipped"] = "makepkg is not available here"
             return
-        build, dest = WORK / "makepkg", WORK / "package"
+        build, dest = ec.WORK / "makepkg", ec.WORK / "package"
         r = sh("cd packaging/arch && BUILDDIR='%s' PKGDEST='%s' makepkg -f --nodeps --noconfirm > '%s' 2>&1; echo rc=$?"
-               % (build, dest, OUT / "package.log"), timeout=1800)
+               % (build, dest, ec.OUT / "package.log"), timeout=1800)
         d["makepkg"] = r["out"].strip()
-        d["tail"] = sh(["tail", "-n", "15", str(OUT / "package.log")])["out"]
+        d["tail"] = sh(["tail", "-n", "15", str(ec.OUT / "package.log")])["out"]
         packages = sorted(dest.glob("roomy-*.pkg.tar.*")) if dest.is_dir() else []
         d["contents"] = sh(["pacman", "-Qlp", str(packages[0])])["out"] if packages else ""
         d["desktop_file"] = sh("desktop-file-validate packaging/com.mudlej.Roomy.desktop 2>&1")["out"].strip()
@@ -543,15 +541,7 @@ def package():
 
 
 def main():
-    OUT.mkdir(parents=True)
-    WORK.mkdir(parents=True)
-    ec._log_file = open(OUT / "run.log", "a")
-    latest = ec.DATA / "results" / f"latest-{KIND}"
-    with contextlib.suppress(OSError):
-        if latest.is_symlink():
-            latest.unlink()
-        latest.symlink_to(OUT.name)
-    log(f"results: {OUT}")
+    ec.start_run(KIND)
     session = None
     try:
         if os.environ.get("ROOMY_LAB_SKIP_BUILD") == "1":  # for dry runs of this script itself
@@ -562,18 +552,18 @@ def main():
                 session = run_checks()
             return
         with step("build") as d:
-            # The window has only ever been type-checked before this; keep the compiler's whole output.
-            r = sh("cargo build --release --workspace > '%s' 2>&1; echo rc=$?" % (OUT / "build.log"), timeout=1800)
+            # Keep the full compiler output in build.log.
+            r = sh("cargo build --release --workspace > '%s' 2>&1; echo rc=$?" % (ec.OUT / "build.log"), timeout=1800)
             d["cargo"] = r["out"].strip()
-            d["tail"] = sh(["tail", "-n", "40", str(OUT / "build.log")])["out"]
+            d["tail"] = sh(["tail", "-n", "40", str(ec.OUT / "build.log")])["out"]
             expect(d, "rc=0" in d["cargo"] and GUI.is_file(), "the build failed; see build.log")
         build_ok = ec.REPORT["steps"][-1]["ok"]
         if APPIMAGE and build_ok:
             with step("appimage") as d:
-                image = ec.REPO / "work" / "dist" / "roomy-x86_64.AppImage"
-                r = sh("just appimage > '%s' 2>&1; echo rc=$?" % (OUT / "appimage.log"), timeout=1800)
+                image = SINGLE_FILE
+                r = sh("just appimage > '%s' 2>&1; echo rc=$?" % (ec.OUT / "appimage.log"), timeout=1800)
                 d["script"] = r["out"].strip()
-                d["tail"] = sh(["tail", "-n", "6", str(OUT / "appimage.log")])["out"]
+                d["tail"] = sh(["tail", "-n", "6", str(ec.OUT / "appimage.log")])["out"]
                 d["bytes"] = image.stat().st_size if image.is_file() else None
                 expect(d, "rc=0" in d["script"] and d["bytes"], "the single file could not be built; see appimage.log")
                 if d["bytes"]:
@@ -586,9 +576,9 @@ def main():
                 session = run_checks()
             return
         with step("tests") as d:
-            r = sh("cargo test --workspace > '%s' 2>&1; echo rc=$?" % (OUT / "tests.log"), timeout=1800)
+            r = sh("cargo test --workspace > '%s' 2>&1; echo rc=$?" % (ec.OUT / "tests.log"), timeout=1800)
             d["cargo"] = r["out"].strip()
-            d["results"] = sh("grep -E 'test result|FAILED|panicked' '%s'" % (OUT / "tests.log"))["out"]
+            d["results"] = sh("grep -E 'test result|FAILED|panicked' '%s'" % (ec.OUT / "tests.log"))["out"]
             expect(d, "rc=0" in d["cargo"], "tests failed on this machine; see tests.log")
         if build_ok:
             session = run_checks()
@@ -627,11 +617,11 @@ def on_this_distribution():
         d["built"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(SINGLE_FILE.stat().st_mtime))
         use_single_file(d, SINGLE_FILE)
         # What the doctor makes of this system as it is, and what setup proposes, before anything is installed.
-        before = roomy("doctor", "--report-file", OUT / "doctor-before.txt")
+        before = roomy("doctor", "--report-file", ec.OUT / "doctor-before.txt")
         d["doctor_before_rc"] = before["rc"]
         d["problems_before"] = [line for line in before["out"].splitlines() if line.startswith(("[FAIL]", "[WARN]", "[SKIP]"))][:20]
         proposed = sh([str(ec.ROOMY), "setup"], timeout=120, input="")
-        (OUT / "setup-proposed.txt").write_text(proposed["out"] + "\n" + proposed["err"])
+        (ec.OUT / "setup-proposed.txt").write_text(proposed["out"] + "\n" + proposed["err"])
         d["proposed"] = [line for line in proposed["out"].splitlines() if line.startswith(("  ", "Note:", "roomy c", "roomy d"))][:12]
     return ec.REPORT["steps"][-1]["ok"]
 
@@ -640,13 +630,13 @@ def run_checks():
     """Everything after the build. Returns the fallback desktop session, if one was started."""
     session = None
     with step("setup") as d:
-        # The box may predate packages roomy now needs (the sound library): let roomy install them itself.
+        # Let roomy install whatever the box lacks.
         r = roomy("setup", "--yes", timeout=1800)
-        (OUT / "setup.txt").write_text(r["out"] + "\n" + r["err"])
+        (ec.OUT / "setup.txt").write_text(r["out"] + "\n" + r["err"])
         d["rc"], d["secs"], d["tail"] = r["rc"], r["secs"], (r["out"] + "\n" + r["err"])[-1500:]
         expect(d, r["rc"] == 0, "roomy setup did not leave this box ready; see its output")
     with step("doctor") as d:
-        r = roomy("doctor", "--report-file", OUT / "doctor.txt")
+        r = roomy("doctor", "--report-file", ec.OUT / "doctor.txt")
         d["rc"] = r["rc"]
         d["window_line"] = [line for line in r["out"].splitlines() if "window" in line]
         expect(d, r["rc"] == 0, "roomy doctor reports problems; see doctor.txt")
@@ -656,22 +646,17 @@ def run_checks():
         if not d["wayland"] and not d["x11"]:
             # No desktop reachable: fall back to an invisible one, which still exercises everything but GPU drawing.
             session = subprocess.Popen(["weston", "--backend=headless", "--socket=roomy-lab", "--width=1600", "--height=1000"],
-                                       stdout=open(OUT / "weston.log", "w"), stderr=subprocess.STDOUT)
+                                       stdout=open(ec.OUT / "weston.log", "w"), stderr=subprocess.STDOUT)
             time.sleep(2)
             os.environ["WAYLAND_DISPLAY"] = "roomy-lab"
             d["fallback"] = "headless weston"
             expect(d, session.poll() is None, "no desktop session, and a headless one could not be started")
     if not QUICK:
         empty_library()
-    with step("prepare") as d:
-        if not ec.BASE_IMAGE.is_file():
-            raise RuntimeError(f"{ec.BASE_IMAGE} is missing: run just lab-probe once first (it downloads the guest image)")
-        key = str(WORK / "id_ed25519")
-        r = sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "roomy-lab", "-f", key])
-        if r["rc"] != 0:
-            raise RuntimeError(f"ssh-keygen failed: {r}")
+    with step("prepare"):
+        ec.require_base_image()
+        key, key_pub = ec.new_key(ec.WORK)
     if ec.REPORT["steps"][-1]["ok"]:
-        key_pub = Path(key + ".pub").read_text().strip()
         main_vm(key, key_pub)
         if not QUICK:
             gpu_vm(key, key_pub)
@@ -681,34 +666,14 @@ def run_checks():
 
 
 def finish(session):
-    for folder in ec.VMS:
-        with contextlib.suppress(Exception):
-            roomy("vm", "force-off", folder, timeout=20)
-            ec.collect_logs(folder, folder.name)
-    sh(["pkill", "-f", str(GUI)])
-    if session:
-        session.terminate()
-    time.sleep(1)
-    ec.REPORT["processes_at_end"] = ec.processes()
-    ec.REPORT["finished"] = time.strftime("%Y%m%d-%H%M%S")
-    ec.save()
-    lines = [f"roomy window check {TS}" + (f" on {distribution()}, single-file release" if DISTRO else ""), ""]
-    for s in ec.REPORT["steps"]:
-        verdict = {True: "ok", False: "FAILED"}.get(s["ok"], "interrupted")
-        note = s.get("error") or s["data"].get("why") or ""
-        lines.append(f"{verdict:11} {s.get('secs', ''):>7}  {s['name']}  {str(note)[:150]}")
-    failed = sum(1 for s in ec.REPORT["steps"] if s["ok"] is False)
-    pictures = sorted(str(p.relative_to(OUT)) for p in OUT.glob("*/*.png"))
-    lines += ["", f"{len(ec.REPORT['steps']) - failed} ok, {failed} failed",
-              f"pictures: {', '.join(pictures) or 'none'}",
-              f"processes left at the end: {ec.REPORT['processes_at_end'] or 'none'}"]
-    (OUT / "SUMMARY.txt").write_text("\n".join(lines) + "\n")
-    print("\n" + "\n".join(lines))
-    if not ec.KEEP:
-        shutil.rmtree(WORK, ignore_errors=True)
-        with contextlib.suppress(OSError):
-            (ec.DATA / "scratch").rmdir()
-    log(f"done. Everything is in {OUT}")
+    def stop():
+        sh(["pkill", "-f", str(GUI)])
+        if session:
+            session.terminate()
+
+    pictures = sorted(str(p.relative_to(ec.OUT)) for p in ec.OUT.glob("*/*.png"))
+    ec.finish_run(f"roomy window check {TS}" + (f" on {distribution()}, single-file release" if DISTRO else ""),
+                  stop=stop, extra_lines=[f"pictures: {', '.join(pictures) or 'none'}"])
 
 
 if __name__ == "__main__":

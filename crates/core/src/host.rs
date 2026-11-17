@@ -214,6 +214,13 @@ pub struct Firmware {
     pub vars_format: String,
 }
 
+/// [`find_firmware`], for when there is no going on without it.
+pub fn require_firmware(env: &Env) -> crate::Result<Firmware> {
+    find_firmware(env).ok_or_else(|| {
+        crate::err!("no UEFI firmware for virtual machines found (run: {} doctor)", crate::env::roomy_command())
+    })
+}
+
 /// Picks UEFI firmware for x86-64 q35 machines without Secure Boot.
 ///
 /// Uses the firmware descriptors that distributions ship for exactly this
@@ -282,6 +289,61 @@ fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
+/// A graphics card of this computer, as far as choosing one for a VM goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gpu {
+    /// Kernel name, e.g. `card1`.
+    pub card: String,
+    /// The device programs render with, e.g. `/dev/dri/renderD128`.
+    pub render_node: PathBuf,
+    /// The card the firmware showed its start-up screen on.
+    pub boot_display: bool,
+    /// Whether a monitor is connected to this card.
+    pub has_monitor: bool,
+}
+
+/// The graphics cards that can render, in kernel order.
+pub fn gpus(env: &Env) -> Vec<Gpu> {
+    const DRM: &str = "/sys/class/drm";
+    let entries = env.list(DRM);
+    let name = |path: &Path| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut found = Vec::new();
+    for entry in &entries {
+        let card = name(entry);
+        let is_card =
+            card.strip_prefix("card").is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()));
+        if !is_card {
+            continue;
+        }
+        // The card's render device is listed next to it under its hardware device.
+        let Some(render) =
+            env.list(&format!("{DRM}/{card}/device/drm")).iter().map(|p| name(p)).find(|n| n.starts_with("renderD"))
+        else {
+            continue;
+        };
+        let boot_display = env.read(&format!("{DRM}/{card}/device/boot_vga")).is_ok_and(|v| v.trim() == "1");
+        // Connectors are named after their card: card1-DP-1, card1-HDMI-A-1, ...
+        let has_monitor = entries.iter().any(|connector| {
+            name(connector).starts_with(&format!("{card}-"))
+                && std::fs::read_to_string(connector.join("status")).is_ok_and(|status| status.trim() == "connected")
+        });
+        found.push(Gpu { card, render_node: Path::new("/dev/dri").join(render), boot_display, has_monitor });
+    }
+    found
+}
+
+/// The graphics card a VM's accelerated graphics should be drawn on: the one
+/// the desktop is shown with. A picture drawn on one card generally cannot be
+/// shown by another without being copied through main memory, and handing
+/// such a picture to the wrong card shows garbage. QEMU's own default is
+/// whichever card the kernel happens to list first.
+pub fn display_gpu(env: &Env) -> Option<Gpu> {
+    let all = gpus(env);
+    let rank = |gpu: &Gpu| (gpu.has_monitor, gpu.boot_display);
+    // max_by_key keeps the last of equals; reversing makes the first listed card win ties.
+    all.into_iter().rev().max_by_key(rank)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,62 +380,4 @@ mod tests {
         assert!(glob_matches("pc-*-10.1", "pc-q35-10.1"));
         assert!(!glob_matches("pc-q35-9.*", "pc-q35-10.1"));
     }
-}
-
-/// A graphics card of this computer, as far as choosing one for a VM goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Gpu {
-    /// Kernel name, e.g. `card1`.
-    pub card: String,
-    /// The device programs render with, e.g. `/dev/dri/renderD128`.
-    pub render_node: PathBuf,
-    /// Kernel driver, e.g. `amdgpu`.
-    pub driver: String,
-    /// The card the firmware showed its start-up screen on.
-    pub boot_display: bool,
-    /// Whether a monitor is connected to this card.
-    pub has_monitor: bool,
-}
-
-/// The graphics cards that can render, in kernel order.
-pub fn gpus(env: &Env) -> Vec<Gpu> {
-    const DRM: &str = "/sys/class/drm";
-    let entries = env.list(DRM);
-    let name = |path: &Path| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut found = Vec::new();
-    for entry in &entries {
-        let card = name(entry);
-        let is_card =
-            card.strip_prefix("card").is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()));
-        if !is_card {
-            continue;
-        }
-        // The card's render device is listed next to it under its hardware device.
-        let Some(render) =
-            env.list(&format!("{DRM}/{card}/device/drm")).iter().map(|p| name(p)).find(|n| n.starts_with("renderD"))
-        else {
-            continue;
-        };
-        let driver = std::fs::read_link(entry.join("device/driver")).map(|target| name(&target)).unwrap_or_default();
-        let boot_display = env.read(&format!("{DRM}/{card}/device/boot_vga")).is_ok_and(|v| v.trim() == "1");
-        // Connectors are named after their card: card1-DP-1, card1-HDMI-A-1, ...
-        let has_monitor = entries.iter().any(|connector| {
-            name(connector).starts_with(&format!("{card}-"))
-                && std::fs::read_to_string(connector.join("status")).is_ok_and(|status| status.trim() == "connected")
-        });
-        found.push(Gpu { card, render_node: Path::new("/dev/dri").join(render), driver, boot_display, has_monitor });
-    }
-    found
-}
-
-/// The graphics card a VM's accelerated graphics should be drawn on: the one
-/// the desktop is shown with. A picture drawn on one card generally cannot be
-/// shown by another without being copied through main memory, and handing
-/// such a picture to the wrong card shows garbage. QEMU's own default is
-/// whichever card the kernel happens to list first.
-pub fn display_gpu(env: &Env) -> Option<Gpu> {
-    let all = gpus(env);
-    let rank = |gpu: &Gpu| (gpu.has_monitor, gpu.boot_display);
-    // max_by_key keeps the last of equals; reversing makes the first listed card win ties.
-    all.into_iter().rev().max_by_key(rank)
 }

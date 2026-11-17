@@ -9,7 +9,6 @@ use roomy_core::vm::Config;
 fn command_row(title: &str, command: &str) -> adw::ActionRow {
     let row = crate::plain_row(title, command);
     row.set_subtitle_selectable(true);
-
     row.add_css_class("property");
     let copy =
         gtk::Button::builder().icon_name("edit-copy-symbolic").valign(gtk::Align::Center).tooltip_text("Copy").build();

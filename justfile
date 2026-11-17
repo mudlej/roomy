@@ -13,8 +13,6 @@ tools := root / "work" / "tools"
 default:
     @just --list --unsorted
 
-# ------------------------------------------------------------------- daily loop --
-
 # Build and start roomy: no arguments opens the window, `just run doctor`, `just run vm list`, ...
 run *args: build
     @"{{ root }}/target/release/roomy" "$@"
@@ -23,8 +21,6 @@ run *args: build
 doctor: build
     @"{{ root }}/target/release/roomy" doctor
 
-# --------------------------------------------------------------------- quality --
-
 # Fetch the dependencies named in Cargo.lock.
 setup:
     cargo fetch --locked
@@ -32,10 +28,7 @@ setup:
 # The full local gate: formatting, lints, every test. Needs GTK 4 and libadwaita (the box has them).
 check: format-check lint test
 
-# Where GTK 4 is not installed, the window can only be type-checked, against the stand-in
-# library descriptions in lab/typecheck, and its crate is left out of the tests.
-#
-# The same gate for a machine without the window toolkit (type-checks the window, skips its tests).
+# The same gate without GTK 4: type-checks the window against the stubs in lab/typecheck and skips its tests.
 check-headless: format-check
     PKG_CONFIG_PATH="{{ root }}/lab/typecheck" cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace --exclude roomy-gui
@@ -55,8 +48,6 @@ lint:
 # Every crate's tests.
 test:
     cargo test --workspace
-
-# ---------------------------------------------------------------------- builds --
 
 # Release build of the `roomy` command and its window.
 build:
@@ -116,9 +107,8 @@ package-arch:
     mkdir -p "{{ dist }}"
     cd "{{ root }}/packaging/arch" && PKGDEST="{{ dist }}" BUILDDIR="{{ root }}/work/makepkg" makepkg -f
 
-# ------------------------------------------------------------------------- lab --
-# Runs against real QEMU and a real guest, inside the box. Each run writes what it saw to
-# work/lab/results/<kind>-<time>/ (SUMMARY.txt first) and points work/lab/results/latest-<kind> at it.
+# The lab-* recipes run against real QEMU and a real guest, inside the box. Each run writes what it saw
+# to work/lab/results/<kind>-<time>/ (SUMMARY.txt first) and points work/lab/results/latest-<kind> at it.
 
 # First experiments against QEMU itself; also downloads the guest image the other lab recipes use.
 lab-probe *args:

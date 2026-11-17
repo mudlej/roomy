@@ -96,8 +96,7 @@ impl Agent {
     }
 }
 
-/// True when the guest has the agent's channel open, according to QEMU.
-/// Whether the guest's agent has its end of the channel open.
+/// Whether the guest's agent has its end of the channel open, according to QEMU.
 pub fn agent_is_listening(qmp: &mut Qmp) -> bool {
     qmp.execute("query-chardev", None).ok().is_some_and(|chardevs| {
         chardevs

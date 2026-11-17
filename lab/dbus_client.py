@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Minimal QEMU D-Bus display client for the roomy lab.
+Runs inside the Arch lab box (distrobox.ini) only, started by probe.py.
 
 Connects to a QEMU `-display dbus` instance (over a bus address or an
 already-connected peer-to-peer socket), dumps what QEMU exposes, registers a
 display listener, and records every call QEMU makes on it. The result is
-written as JSON to --out. Run by probe.py; not meant to be used by hand.
+written as JSON to --out. Not meant to be used by hand.
 """
 import argparse
 import json
@@ -229,7 +230,6 @@ def main():
     ap.add_argument("--seconds", type=float, default=4.0)
     ap.add_argument("--extras", action="store_true", help="advertise Unix.Map and ScanoutDMABUF2 support")
     ap.add_argument("--resize", help="WxH to request with SetUIInfo one second after registering")
-    ap.add_argument("--console", type=int, default=0)
     ARGS = ap.parse_args()
 
     def watchdog(signum, frame):
@@ -263,9 +263,9 @@ def main():
         return call(path, "org.freedesktop.DBus.Properties", "GetAll",
                     GLib.Variant("(s)", (iface,))).unpack()[0]
 
-    console_path = f"{ROOT}/Console_{ARGS.console}"
+    console_path = f"{ROOT}/Console_0"
 
-    # 1. What does this QEMU expose?
+    # What does this QEMU expose?
     paths = [f"{ROOT}/VM", console_path, f"{ROOT}/Clipboard", f"{ROOT}/Audio"]
     try:
         managed = call(ROOT, "org.freedesktop.DBus.ObjectManager", "GetManagedObjects").unpack()[0]
@@ -289,8 +289,8 @@ def main():
             OUT["introspection"][p] = "ERROR " + repr(e)
     write_out()
 
-    # 2. Register as a display listener. QEMU replies first, then performs the
-    #    server side of the D-Bus handshake on the socket we passed.
+    # Register as a display listener. QEMU replies first, then performs the
+    # server side of the D-Bus handshake on the socket we passed.
     loop = GLib.MainLoop()
     listener_conn = None
     try:

@@ -1,8 +1,9 @@
 //! The settings dialog of one VM. Every group says when its changes take effect.
 
 use crate::Context;
-use crate::fields::{Amount, Holder, PortForwards, SHARED_FOLDERS_IN_THE_GUEST, SharedFolders};
-use crate::machine::SUSPEND_UNAVAILABLE_WITH_GPU;
+use crate::fields::{
+    Amount, FeatureSwitches, Form, Holder, PortForwards, SHARED_FOLDERS_IN_THE_GUEST, SharedFolders, host_size,
+};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use roomy_core::control::{self, State};
@@ -71,8 +72,7 @@ fn build(
     state: State,
     done: Rc<dyn Fn(String)>,
 ) {
-    let host_cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
-    let host_memory_gb = (host::memory_mb(&context.env).unwrap_or(8192) / 1024).max(1);
+    let (host_cpus, host_memory_gb) = host_size(&context.env);
     let off = state == State::Off;
     let later = if off {
         "Used the next time the virtual machine starts."
@@ -81,21 +81,7 @@ fn build(
     };
 
     let name = adw::EntryRow::builder().title("Name").text(config.name.as_str()).build();
-    let network = adw::SwitchRow::builder()
-        .title("Network")
-        .subtitle("Internet access through this computer")
-        .active(config.features.network)
-        .build();
-    let clipboard = adw::SwitchRow::builder()
-        .title("Clipboard sharing")
-        .subtitle("Copy and paste text between the guest and this computer")
-        .active(config.features.clipboard)
-        .build();
-    let microphone = adw::SwitchRow::builder()
-        .title("Microphone")
-        .subtitle("Let the guest hear this computer's microphone")
-        .active(config.features.microphone)
-        .build();
+    let switches = FeatureSwitches::new(&config.features);
     // A disk only grows, and by no more than there is room for where it is kept.
     let disk =
         Amount::new("Disk (GB)", disk_gb as f64, free_gb.map_or(16384.0, |free| (disk_gb + free) as f64), 1.0, 0);
@@ -108,9 +94,9 @@ fn build(
     let immediate = adw::PreferencesGroup::builder().title("Takes effect immediately").build();
     for row in [
         name.upcast_ref::<gtk::Widget>(),
-        network.upcast_ref(),
-        clipboard.upcast_ref(),
-        microphone.upcast_ref(),
+        switches.network.upcast_ref(),
+        switches.clipboard.upcast_ref(),
+        switches.microphone.upcast_ref(),
         disk.row.upcast_ref(),
     ] {
         immediate.add(row);
@@ -126,15 +112,10 @@ fn build(
     let memory_as_shown = memory.value();
     let exactly = if memory_as_shown == memory_gb { String::new() } else { format!(" Now {} MB.", config.memory_mb) };
     memory.set_note(&format!("This computer has {host_memory_gb} GB.{exactly}"));
-    let gpu = adw::SwitchRow::builder()
-        .title("GPU acceleration")
-        .subtitle(SUSPEND_UNAVAILABLE_WITH_GPU)
-        .active(config.features.gpu_acceleration)
-        .build();
     let hardware = adw::PreferencesGroup::builder().title("Hardware").description(later).build();
     hardware.add(&cpus.row);
     hardware.add(&memory.row);
-    hardware.add(&gpu);
+    hardware.add(&switches.gpu);
 
     let shared = SharedFolders::new(config.shared_folders.clone(), &format!("{later} {SHARED_FOLDERS_IN_THE_GUEST}"));
     let forwarded = adw::PreferencesGroup::builder()
@@ -146,43 +127,15 @@ fn build(
     for group in [&immediate, &hardware, &shared.group, &forwarded] {
         page.add(group);
     }
-    let cancel = gtk::Button::with_label("Cancel");
-    let apply = gtk::Button::with_label("Apply");
-    apply.add_css_class("suggested-action");
-    let header = adw::HeaderBar::builder().show_start_title_buttons(false).show_end_title_buttons(false).build();
-    header.pack_start(&cancel);
-    header.pack_end(&apply);
-    let toasts = adw::ToastOverlay::new();
-    toasts.set_child(Some(&page));
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&toasts));
-    let dialog = adw::Dialog::builder()
-        .title(format!("Settings of {}", config.name))
-        .content_width(600)
-        .content_height(760)
-        .child(&toolbar)
-        .build();
-    let complain = {
-        let toasts = toasts.clone();
-        move |message: &str| {
-            // Messages carry paths and other programs' words: shown as they are, never read as markup.
-            let toast = adw::Toast::builder().use_markup(false).title(message).timeout(0).build();
-            toasts.add_toast(toast);
-        }
-    };
-
-    cancel.connect_clicked({
-        let dialog = dialog.clone();
-        move |_| {
-            dialog.close();
-        }
-    });
+    let form = Form::new(&format!("Settings of {}", config.name), "Apply", &page);
+    let complain = form.complainer();
+    let (dialog, apply) = (form.dialog, form.confirm);
     let forwards = PortForwards::new(Holder::Group(forwarded.clone()), config.port_forwards.clone(), complain.clone());
 
     apply.connect_clicked({
         let (context, folder, dialog) = (context.clone(), folder.clone(), dialog.clone());
         move |apply| {
+            let features = switches.get();
             let changes = Changes {
                 name: Some(name.text().to_string()),
                 cpus: Some(cpus.value() as u32),
@@ -191,10 +144,10 @@ fn build(
                 } else {
                     (memory.value() * 1024.0).round() as u64
                 }),
-                gpu_acceleration: Some(gpu.is_active()),
-                network: Some(network.is_active()),
-                clipboard: Some(clipboard.is_active()),
-                microphone: Some(microphone.is_active()),
+                gpu_acceleration: Some(features.gpu_acceleration),
+                network: Some(features.network),
+                clipboard: Some(features.clipboard),
+                microphone: Some(features.microphone),
                 shared_folders: Some(shared.get()),
                 port_forwards: Some(forwards.get()),
                 disk_gb: Some(disk.value() as u64),

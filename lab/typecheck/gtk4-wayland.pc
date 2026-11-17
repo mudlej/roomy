@@ -1,5 +1,0 @@
-Name: gtk4-wayland
-Description: type-check stub
-Version: 4.18.0
-Libs: -lgtk-4
-Cflags:

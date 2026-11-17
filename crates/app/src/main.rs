@@ -99,16 +99,16 @@ fn window_program(env: &Env) -> Option<PathBuf> {
 /// explanation, and working `doctor` and `setup` commands, instead of a loader error.
 fn open_window() -> ExitCode {
     use std::os::unix::process::CommandExt;
-    let env = Env::system();
-    let check = doctor::check_window(window_program(&env).as_deref());
-    let Some(program) = window_program(&env).filter(|_| check.status == doctor::Status::Ok) else {
+    let program = window_program(&Env::system());
+    let check = doctor::check_window(program.as_deref());
+    let Some(program) = program.filter(|_| check.status == doctor::Status::Ok) else {
         eprintln!("roomy: {}.", check.summary);
         if let Some(log) = &check.log {
             eprintln!("{}", log.trim_end());
         }
         let roomy = roomy_core::env::roomy_command();
         eprintln!("\nRun '{roomy} doctor' to see what is missing, or '{roomy} setup' to install it.");
-        eprintln!("Virtual machines can be used without the window: see 'roomy --help'.");
+        eprintln!("Virtual machines can be used without the window: see '{roomy} --help'.");
         return ExitCode::from(EXIT_PROBLEMS);
     };
     let mut command = Command::new(&program);

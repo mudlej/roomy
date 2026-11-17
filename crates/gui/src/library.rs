@@ -9,7 +9,7 @@ use roomy_core::library;
 use roomy_core::vm::{Config, Folder};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::time::Duration;
 
 /// One line of the library file, with what could be found out about it.
@@ -56,29 +56,6 @@ pub struct Library {
     refreshing: Cell<bool>,
     /// The doctor's last verdict, for roomy's own test runs.
     pub doctor_verdict: RefCell<Option<String>>,
-}
-
-macro_rules! on {
-    ($library:expr, |$this:ident $(, $arg:pat_param)*| $body:expr) => {{
-        let weak: Weak<Library> = Rc::downgrade($library);
-        move |$($arg),*| {
-            if let Some($this) = weak.upgrade() {
-                $body
-            }
-        }
-    }};
-}
-
-fn state_words(state: State) -> &'static str {
-    match state {
-        State::Off => "Off",
-        State::Suspended => "Suspended",
-        State::Starting => "Starting…",
-        State::Running => "Running",
-        State::Paused => "Paused",
-        State::Suspending => "Suspending…",
-        State::Stopping => "Shutting down…",
-    }
 }
 
 impl Library {
@@ -171,9 +148,7 @@ impl Library {
     }
 
     fn tell(&self, message: &str) {
-        // Messages carry paths and other programs' words: shown as they are, never read as markup.
-        let toast = adw::Toast::builder().use_markup(false).title(message).timeout(8).build();
-        self.toasts.add_toast(toast);
+        crate::toast(&self.toasts, message, 8);
     }
 
     /// Runs the doctor. Its report is shown when asked for, or when something blocks VMs.
@@ -315,7 +290,7 @@ impl Library {
                 Ok((folder, config, state)) => {
                     row.show_thumbnail(Some(&folder.thumbnail()));
                     row.row.set_title(&config.name);
-                    row.row.set_subtitle(&format!("{} · {}", state_words(*state), entry.dir.display()));
+                    row.row.set_subtitle(&format!("{} · {}", crate::state_words(*state), entry.dir.display()));
                     row.row.set_activatable(true);
                     row.start.set_visible(matches!(state, State::Off | State::Suspended));
                     row.start.set_label(if *state == State::Suspended { "Continue" } else { "Start" });
@@ -442,17 +417,12 @@ impl Library {
             "This permanently deletes its disk, saved state and settings in {}. Files of your own in that folder are kept.",
             dir.display()
         );
-        let dialog = adw::AlertDialog::new(Some(&format!("Delete “{name}”?")), Some(&body));
-        dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
-        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
-        dialog.connect_response(
-            None,
-            on!(self, |this, _, response| {
-                if response != "delete" {
-                    return;
-                }
+        crate::confirm(
+            &self.window,
+            &format!("Delete “{name}”?"),
+            &body,
+            "Delete",
+            on!(self, |this| {
                 if let Some(open) = this.machines.borrow().iter().find(|m| *m.folder() == folder) {
                     open.window().close();
                 }
@@ -464,6 +434,5 @@ impl Library {
                 this.refresh();
             }),
         );
-        dialog.present(Some(&self.window));
     }
 }

@@ -1,5 +1,5 @@
 Name: libadwaita-1
 Description: type-check stub
-Version: 1.7.0
+Version: 1.5.0
 Libs: -ladwaita-1
 Cflags:

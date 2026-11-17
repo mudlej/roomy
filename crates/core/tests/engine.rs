@@ -6,13 +6,14 @@ mod common;
 
 use common::FakeHost;
 use roomy_core::control::{self, Request, State};
+use roomy_core::process::wait_until;
 use roomy_core::supervisor;
 use roomy_core::vm::{self, Features, Folder, NewVm, SharedFolder};
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn new_vm(name: &str) -> NewVm {
     NewVm {
@@ -33,12 +34,8 @@ fn create(host: &FakeHost, new: NewVm) -> Folder {
     vm::create(&host.env(), &host.base.join("vms"), new).unwrap()
 }
 
-fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for: {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+fn wait_for(what: &str, done: impl FnMut() -> bool) {
+    assert!(wait_until(Duration::from_secs(15), done), "timed out waiting for: {what}");
 }
 
 /// A supervisor running on a thread, as `roomy supervise` would run it in its own process.

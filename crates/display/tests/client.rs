@@ -117,8 +117,8 @@ fn the_screen_arrives_in_every_form_qemu_uses() {
     match next(&events) {
         Event::ScanoutDmabuf(dmabuf) => {
             assert_eq!((dmabuf.width, dmabuf.height, dmabuf.stride), (640, 480, 2560));
-            assert_eq!((dmabuf.fourcc, dmabuf.modifier, dmabuf.y0_top), (0x3432_4258, 0x00ff_ffff_ffff_ffff, true));
-            assert!(dmabuf.stored_bottom_up(), "QEMU's flag set means the picture is stored bottom first");
+            assert_eq!((dmabuf.fourcc, dmabuf.modifier), (0x3432_4258, 0x00ff_ffff_ffff_ffff));
+            assert!(dmabuf.stored_bottom_up, "QEMU's flag set means the picture is stored bottom first");
             let mut content = String::new();
             use std::io::{Read, Seek};
             let mut file = std::fs::File::from(dmabuf.fd);

@@ -18,15 +18,17 @@ pub struct GuestSystem {
     pub install_helpers: Option<&'static str>,
 }
 
-const START_AGENT: &str = "sudo systemctl enable --now qemu-guest-agent";
+// A macro rather than only a constant, so that `concat!` can take it.
+macro_rules! start_agent {
+    () => {
+        "sudo systemctl enable --now qemu-guest-agent"
+    };
+}
+const START_AGENT: &str = start_agent!();
 
 macro_rules! system {
     ($id:literal, $label:literal, $install:literal) => {
-        GuestSystem {
-            id: $id,
-            label: $label,
-            install_helpers: Some(concat!($install, " && sudo systemctl enable --now qemu-guest-agent")),
-        }
+        GuestSystem { id: $id, label: $label, install_helpers: Some(concat!($install, " && ", start_agent!())) }
     };
 }
 

@@ -5,7 +5,8 @@ pkgrel=1
 pkgdesc="Simple, reliable virtual machines on KVM and QEMU"
 arch=('x86_64')
 license=('GPL-3.0-or-later')
-depends=('qemu-desktop' 'qemu-img' 'virtiofsd' 'edk2-ovmf' 'gtk4' 'libadwaita' 'libpulse')
+depends=('qemu-desktop' 'qemu-img' 'virtiofsd' 'edk2-ovmf' 'gtk4' 'libadwaita')
+optdepends=('libpulse: sound and microphone')
 makedepends=('cargo' 'pkgconf')
 options=('!debug')
 
