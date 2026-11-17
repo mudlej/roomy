@@ -8,14 +8,10 @@ use crate::control::{self, State};
 use crate::env::{self, Env};
 use crate::error::Context;
 use crate::vm::{self, Folder, remove_if_present};
-use crate::{Result, err, process};
+use crate::{Result, err};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-/// How long a supervisor may take to finish after its VM stopped.
-const SUPERVISOR_EXIT: Duration = Duration::from_secs(10);
 
 const SCHEMA: u32 = 1;
 
@@ -108,15 +104,7 @@ pub fn delete(env: &Env, library: &Path, folder: &Folder) -> Result<Vec<PathBuf>
     }
     // Holding the lock means no supervisor can start on a folder that is being taken apart. A
     // lock file that cannot even be opened is no obstacle: then nothing can be running there.
-    // A supervisor whose VM has just stopped stops answering a moment before it lets go of the lock.
-    let mut attempt = folder.try_lock();
-    if matches!(attempt, Ok(None)) {
-        process::wait_until(SUPERVISOR_EXIT, || {
-            attempt = folder.try_lock();
-            !matches!(attempt, Ok(None))
-        });
-    }
-    let lock = match attempt {
+    let lock = match folder.lock_after_supervisor() {
         Ok(None) => return Err(err!("the virtual machine is in use; turn it off before deleting it")),
         Ok(Some(lock)) => Some(lock),
         Err(_) => None,

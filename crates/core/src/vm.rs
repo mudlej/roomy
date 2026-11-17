@@ -27,6 +27,9 @@ use std::time::Duration;
 
 pub const CONFIG_FILE: &str = "roomy.toml";
 pub const SCHEMA: u32 = 1;
+/// How long a supervisor may take to finish after its VM stopped.
+const SUPERVISOR_EXIT: Duration = Duration::from_secs(10);
+
 const DISK_FILE: &str = "disk.qcow2";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -219,6 +222,19 @@ impl Folder {
         // SAFETY: flock on a descriptor we own; the lock is released when the file is closed.
         let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
         Ok(locked.then_some(file))
+    }
+
+    /// Takes the folder's lock like `try_lock`, giving a supervisor that is finishing time to let
+    /// go of it: once its VM has stopped, it stops answering a moment before it releases the lock.
+    pub fn lock_after_supervisor(&self) -> Result<Option<File>> {
+        let mut attempt = self.try_lock();
+        if matches!(attempt, Ok(None)) {
+            crate::process::wait_until(SUPERVISOR_EXIT, || {
+                attempt = self.try_lock();
+                !matches!(attempt, Ok(None))
+            });
+        }
+        attempt
     }
 
     /// A small picture of the screen as the window last showed it, for lists of VMs.

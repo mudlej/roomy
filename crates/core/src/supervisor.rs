@@ -91,7 +91,7 @@ struct Supervisor {
 impl Supervisor {
     fn start(env: &Env, dir: &Path) -> Result<Supervisor> {
         let folder = Folder::open(dir)?;
-        let lock = folder.try_lock()?.ok_or_else(|| err!("the virtual machine is already running"))?;
+        let lock = folder.lock_after_supervisor()?.ok_or_else(|| err!("the virtual machine is already running"))?;
         folder.ensure_dirs()?;
         folder.clean_interrupted_state()?;
 
