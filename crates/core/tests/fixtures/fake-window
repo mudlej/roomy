@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for roomy-gui: passes the start-up probe, then says who opened it.
+[ "$1" = --probe ] && exit 0
+echo "window opened by $ROOMY_PROGRAM"

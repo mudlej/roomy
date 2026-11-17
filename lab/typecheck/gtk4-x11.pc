@@ -1,0 +1,5 @@
+Name: gtk4-x11
+Description: type-check stub
+Version: 4.18.0
+Libs: -lgtk-4
+Cflags:

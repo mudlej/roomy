@@ -1,0 +1,18 @@
+[package]
+name = "roomy-gui"
+description = "roomy's window: the VM library and each VM's screen"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.92"
+
+[[bin]]
+name = "roomy-gui"
+path = "src/main.rs"
+
+[dependencies]
+roomy-core = { path = "../core" }
+roomy-display = { path = "../display" }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+async-channel = "2"
+serde_json = "1"

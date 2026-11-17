@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- A room with a screen in it: a computer inside the computer. -->
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="#3584e4"/>
+  <rect x="26" y="30" width="76" height="54" rx="7" fill="#ffffff"/>
+  <rect x="33" y="37" width="62" height="40" rx="3" fill="#1c71d8"/>
+  <rect x="42" y="46" width="26" height="18" rx="2" fill="#ffffff" opacity="0.9"/>
+  <rect x="56" y="84" width="16" height="10" fill="#ffffff"/>
+  <rect x="42" y="94" width="44" height="7" rx="3.5" fill="#ffffff"/>
+</svg>

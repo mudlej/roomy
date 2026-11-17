@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""Stand-in for qemu-img in tests. A "disk image" is a text file `qcow2 <bytes>`.
+
+A `fake-qemu-img.conf` JSON file next to this script may contain
+{"fail": "message"} to make every create/resize fail.
+"""
+import json, os, sys
+
+here = os.path.dirname(os.path.abspath(__file__))
+conf_path = os.path.join(here, "fake-qemu-img.conf")
+conf = json.load(open(conf_path)) if os.path.exists(conf_path) else {}
+args = sys.argv[1:]
+
+def size_bytes(text):
+    return int(text[:-1]) << 30 if text.endswith("G") else int(text)
+
+if "--version" in args:
+    print("qemu-img version 11.1.3")
+elif args[0] in ("create", "resize"):
+    if "fail" in conf:
+        print(f"qemu-img: {conf['fail']}", file=sys.stderr)
+        sys.exit(1)
+    path, size = args[-2], args[-1]
+    with open(path, "w") as f:
+        f.write(f"qcow2 {size_bytes(size)}")
+elif args[0] == "info":
+    content = open(args[-1]).read().split()
+    if len(content) != 2 or content[0] != "qcow2":
+        print("qemu-img: not a disk image", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({"format": "qcow2", "virtual-size": int(content[1])}))
+else:
+    sys.exit(f"fake-qemu-img: unsupported {args}")

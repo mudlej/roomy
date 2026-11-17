@@ -1,0 +1,25 @@
+# Builds roomy from this checkout. In this directory:  makepkg -si
+pkgname=roomy
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Simple, reliable virtual machines on KVM and QEMU"
+arch=('x86_64')
+# The licence has not been chosen yet.
+license=('unknown')
+depends=('qemu-desktop' 'qemu-img' 'virtiofsd' 'edk2-ovmf' 'gtk4' 'libadwaita' 'libpulse')
+makedepends=('cargo' 'pkgconf')
+options=('!debug')
+
+build() {
+  cd "$startdir/../.."
+  cargo build --release --locked --workspace
+}
+
+package() {
+  cd "$startdir/../.."
+  # `roomy` finds the window program next to itself.
+  install -Dm755 target/release/roomy "$pkgdir/usr/bin/roomy"
+  install -Dm755 target/release/roomy-gui "$pkgdir/usr/bin/roomy-gui"
+  install -Dm644 packaging/com.mudlej.Roomy.desktop "$pkgdir/usr/share/applications/com.mudlej.Roomy.desktop"
+  install -Dm644 packaging/com.mudlej.Roomy.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.mudlej.Roomy.svg"
+}

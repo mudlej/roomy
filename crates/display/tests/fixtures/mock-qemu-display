@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Stand-in for QEMU's private D-Bus display, for roomy-display's tests.
+
+Usage: mock-qemu-display <socket fd> <log file>
+
+Serves the console, keyboard and pointer objects on the socket. Once a
+listener registers, it plays a fixed sequence of screen calls on it. Every
+call it receives is appended to the log file, one per line.
+"""
+import os
+import sys
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+XML = """
+<node>
+  <interface name="org.qemu.Display1.Console">
+    <method name="RegisterListener"><arg type="h" name="listener" direction="in"/></method>
+    <method name="SetUIInfo">
+      <arg type="q" direction="in"/><arg type="q" direction="in"/><arg type="i" direction="in"/>
+      <arg type="i" direction="in"/><arg type="u" direction="in"/><arg type="u" direction="in"/>
+    </method>
+    <property name="Label" type="s" access="read"/>
+    <property name="Width" type="u" access="read"/>
+    <property name="Height" type="u" access="read"/>
+  </interface>
+  <interface name="org.qemu.Display1.Audio">
+    <method name="RegisterOutListener"><arg type="h" name="listener" direction="in"/></method>
+    <method name="RegisterInListener"><arg type="h" name="listener" direction="in"/></method>
+  </interface>
+  <interface name="org.qemu.Display1.Clipboard">
+    <method name="Register"/>
+    <method name="Unregister"/>
+    <method name="Grab">
+      <arg type="u" direction="in"/><arg type="u" direction="in"/><arg type="as" direction="in"/>
+    </method>
+    <method name="Release"><arg type="u" direction="in"/></method>
+    <method name="Request">
+      <arg type="u" direction="in"/><arg type="as" direction="in"/>
+      <arg type="s" direction="out"/><arg type="ay" direction="out"/>
+    </method>
+  </interface>
+  <interface name="org.qemu.Display1.Keyboard">
+    <method name="Press"><arg type="u" direction="in"/></method>
+    <method name="Release"><arg type="u" direction="in"/></method>
+  </interface>
+  <interface name="org.qemu.Display1.Mouse">
+    <method name="Press"><arg type="u" direction="in"/></method>
+    <method name="Release"><arg type="u" direction="in"/></method>
+    <method name="SetAbsPosition"><arg type="u" direction="in"/><arg type="u" direction="in"/></method>
+    <method name="RelMotion"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+    <property name="IsAbsolute" type="b" access="read"/>
+  </interface>
+</node>
+"""
+PATH = "/org/qemu/Display1/Console_0"
+LISTENER = "/org/qemu/Display1/Listener"
+X8R8G8B8 = 0x20020888
+
+fd, log_path = int(sys.argv[1]), sys.argv[2]
+flags = Gio.DBusConnectionFlags
+state = {"listener": None}
+
+
+def log(line):
+    with open(log_path, "a") as f:
+        f.write(line + "\n")
+
+
+def connection_on(descriptor):
+    stream = Gio.Socket.new_from_fd(descriptor).connection_factory_create_connection()
+    return Gio.DBusConnection.new_sync(stream, Gio.dbus_generate_guid(), flags.AUTHENTICATION_SERVER, None, None)
+
+
+def byte_array(data):
+    return GLib.Variant.new_from_bytes(GLib.VariantType("ay"), GLib.Bytes.new(data), True)
+
+
+def memfd(content):
+    descriptor = os.memfd_create("mock-screen")
+    os.write(descriptor, content)
+    return descriptor
+
+
+def play():
+    """The screen calls a real QEMU makes, in an order that exercises each one."""
+    lc = state["listener"]
+    u, i = (lambda v: GLib.Variant("u", v)), (lambda v: GLib.Variant("i", v))
+
+    def call(iface, method, params, fds=None):
+        fd_list = Gio.UnixFDList.new_from_array(fds) if fds else None
+        try:
+            lc.call_with_unix_fd_list_sync(None, LISTENER, iface, method, params, None, Gio.DBusCallFlags.NONE, 5000, fd_list, None)
+            log(f"listener-answered {method}")
+        except GLib.Error as e:
+            log(f"listener-failed {method} {e.message}")
+
+    core, mapped = "org.qemu.Display1.Listener", "org.qemu.Display1.Listener.Unix.Map"
+    interfaces = lc.call_sync(None, LISTENER, "org.freedesktop.DBus.Properties", "Get", GLib.Variant("(ss)", (core, "Interfaces")),
+                              None, Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]
+    log("listener-interfaces " + ",".join(interfaces))
+    call(core, "Scanout", GLib.Variant.new_tuple(u(4), u(2), u(16), u(X8R8G8B8), byte_array(bytes(range(32)))))
+    call(core, "Update", GLib.Variant.new_tuple(i(1), i(0), i(2), i(1), u(8), u(X8R8G8B8), byte_array(bytes([200] * 8))))
+    if mapped in interfaces:
+        # A 2x2 frame after 8 bytes of something else.
+        call(mapped, "ScanoutMap", GLib.Variant("(huuuuu)", (0, 8, 2, 2, 8, X8R8G8B8)), [memfd(bytes([255] * 8) + bytes(range(16)))])
+        call(mapped, "UpdateMap", GLib.Variant("(iiii)", (0, 1, 2, 1)))
+        # A frame that does not fit its memory must be refused without breaking the listener.
+        call(mapped, "ScanoutMap", GLib.Variant("(huuuuu)", (0, 0, 64, 64, 256, X8R8G8B8)), [memfd(bytes(16))])
+    call(core, "ScanoutDMABUF", GLib.Variant("(huuuutb)", (0, 640, 480, 2560, 0x34324258, 0x00FFFFFFFFFFFFFF, True)), [memfd(b"dmabuf")])
+    call(core, "UpdateDMABUF", GLib.Variant("(iiii)", (0, 0, 640, 480)))
+    call(core, "CursorDefine", GLib.Variant.new_tuple(i(1), i(1), i(0), i(0), byte_array(bytes([1, 2, 3, 4]))))
+    call(core, "MouseSet", GLib.Variant("(iii)", (5, 6, 1)))
+    conn.emit_signal(None, PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                     GLib.Variant("(sa{sv}as)", ("org.qemu.Display1.Mouse", {"IsAbsolute": GLib.Variant("b", False)}, [])))
+    call(core, "Disable", None)
+    return False
+
+
+AUDIO, CLIPBOARD = "/org/qemu/Display1/Audio", "/org/qemu/Display1/Clipboard"
+CLIPBOARD_IFACE, TEXT = "org.qemu.Display1.Clipboard", "text/plain;charset=utf-8"
+
+
+def play_sound(lc, playback):
+    """What QEMU sends a sound listener once it has registered."""
+    iface = "org.qemu.Display1.AudioOutListener" if playback else "org.qemu.Display1.AudioInListener"
+    path = "/org/qemu/Display1/" + iface.rsplit(".", 1)[1]
+
+    def call(method, params):
+        try:
+            reply = lc.call_sync(None, path, iface, method, params, None, Gio.DBusCallFlags.NONE, 5000, None)
+            log(f"sound-answered {iface.rsplit('.', 1)[1]}.{method}")
+            return reply
+        except GLib.Error as e:
+            log(f"sound-failed {method} {e.message}")
+
+    stream = 7 if playback else 9
+    call("Init", GLib.Variant("(tybbuyuub)", (stream, 16, True, False, 48000, 2, 4, 192000, False)))
+    call("SetEnabled", GLib.Variant("(tb)", (stream, True)))
+    call("SetVolume", GLib.Variant.new_tuple(GLib.Variant("t", stream), GLib.Variant("b", False), byte_array(bytes([255, 128]))))
+    if playback:
+        for chunk in range(3):
+            call("Write", GLib.Variant.new_tuple(GLib.Variant("t", stream), byte_array(bytes([chunk] * 8))))
+    else:
+        data = call("Read", GLib.Variant("(tt)", (stream, 6))).unpack()[0]
+        log(f"sound-read {len(data)} bytes, first {data[0]}")
+    call("Fini", GLib.Variant("(t)", (stream,)))
+    return False
+
+
+# The clipboard below behaves like QEMU with a real guest behind it. The guest's helper counts
+# grabs from 0, numbers its own grabs with the count, and silently throws away a grab from the
+# client that does not carry exactly the count (or the count before it, when both grabbed at once).
+guest = {"serial": 0, "helper_restarted": False, "copied_again": False}
+
+
+def session_restarts():
+    """The guest's helper (re)connects: the count starts over and QEMU says so to the client."""
+    guest["serial"] = 0
+    conn.call(None, CLIPBOARD, CLIPBOARD_IFACE, "Register", None, None, Gio.DBusCallFlags.NONE, 5000, None, None)
+
+
+def guest_copies():
+    """The guest copies some text: QEMU announces it to the registered client."""
+    serial, guest["serial"] = guest["serial"], guest["serial"] + 1
+    conn.call_sync(None, CLIPBOARD, CLIPBOARD_IFACE, "Grab", GLib.Variant("(uuas)", (0, serial, [TEXT])), None, Gio.DBusCallFlags.NONE, 5000, None)
+    log(f"clipboard-announced {serial}")
+    return False
+
+
+def guest_pastes():
+    """The guest pastes: QEMU asks the client for the text and waits for it."""
+    again = "-after-restart" if guest["helper_restarted"] else ""
+    try:
+        mime, data = conn.call_sync(None, CLIPBOARD, CLIPBOARD_IFACE, "Request", GLib.Variant("(uas)", (0, [TEXT])),
+                                    None, Gio.DBusCallFlags.NONE, 5000, None).unpack()
+        log(f"clipboard-pasted{again} {mime} {bytes(data).decode()}")
+        if not guest["helper_restarted"]:
+            # The helper in the guest starts anew while this computer's text is on offer.
+            guest["helper_restarted"] = True
+            log("clipboard-helper-restarted")
+            session_restarts()
+    except GLib.Error as e:
+        log(f"clipboard-nothing {e.message}")
+        if not guest["copied_again"]:
+            guest["copied_again"] = True
+            GLib.idle_add(guest_copies)
+    return False
+
+
+def on_call(c, sender, path, iface, method, params, invocation):
+    log(f"{iface.rsplit('.', 1)[1]}.{method} {' '.join(str(v) for v in params.unpack())}".rstrip())
+    if method in ("RegisterOutListener", "RegisterInListener"):
+        descriptor = invocation.get_message().get_unix_fd_list().get(params.unpack()[0])
+        invocation.return_value(None)
+        c.flush_sync(None)
+        GLib.idle_add(play_sound, connection_on(descriptor), method == "RegisterOutListener")
+        return
+    if iface == CLIPBOARD_IFACE:
+        if method == "Register":
+            # Like QEMU, look at the client's clipboard object before answering.
+            c.call_sync(None, CLIPBOARD, "org.freedesktop.DBus.Properties", "Get", GLib.Variant("(ss)", (CLIPBOARD_IFACE, "Interfaces")),
+                        None, Gio.DBusCallFlags.NONE, 5000, None)
+            invocation.return_value(None)
+            session_restarts()
+            GLib.idle_add(guest_copies)
+        elif method == "Request":
+            invocation.return_value(GLib.Variant.new_tuple(GLib.Variant("s", TEXT), byte_array(b"copied in the guest")))
+        elif method == "Grab":
+            invocation.return_value(None)
+            serial = params.unpack()[1]
+            if serial == guest["serial"]:
+                guest["serial"] += 1
+            elif serial != guest["serial"] - 1:
+                log(f"clipboard-discarded grab {serial}, the guest is at {guest['serial']}")
+                return
+            GLib.idle_add(guest_pastes)
+        else:
+            invocation.return_value(None)
+            if method == "Release":
+                GLib.idle_add(guest_pastes)
+        return
+    if method == "RegisterListener":
+        descriptor = invocation.get_message().get_unix_fd_list().get(params.unpack()[0])
+        invocation.return_value(None)
+        c.flush_sync(None)
+        state["listener"] = connection_on(descriptor)
+        GLib.idle_add(play)
+        return
+    invocation.return_value(None)
+
+
+def on_property(c, sender, path, iface, name):
+    return {"Label": GLib.Variant("s", "mock screen"), "Width": GLib.Variant("u", 4), "Height": GLib.Variant("u", 2),
+            "IsAbsolute": GLib.Variant("b", True)}[name]
+
+
+conn = Gio.DBusConnection.new_sync(Gio.Socket.new_from_fd(fd).connection_factory_create_connection(), Gio.dbus_generate_guid(),
+                                   flags.AUTHENTICATION_SERVER | flags.DELAY_MESSAGE_PROCESSING, None, None)
+for interface in Gio.DBusNodeInfo.new_for_xml(XML).interfaces:
+    where = {"org.qemu.Display1.Audio": AUDIO, CLIPBOARD_IFACE: CLIPBOARD}.get(interface.name, PATH)
+    conn.register_object(where, interface, on_call, on_property, None)
+conn.start_message_processing()
+# Never outlive a test that forgot about us.
+GLib.timeout_add_seconds(60, lambda: os._exit(0))
+GLib.MainLoop().run()

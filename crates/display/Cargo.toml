@@ -1,0 +1,11 @@
+[package]
+name = "roomy-display"
+description = "Client for QEMU's D-Bus display: screen, keyboard and pointer of a running VM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gio = "0.22"
+glib = "0.22"
+libc = "0.2"

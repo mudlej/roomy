@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for a roomy-gui whose graphical libraries are missing.
+echo 'error while loading shared libraries: libadwaita-1.so.0' >&2
+exit 127

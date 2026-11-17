@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Stand-in for qemu-system-x86_64 in tests. Speaks just enough QMP.
+
+Behaviour is tuned by an optional `fake-qemu.conf` JSON file next to this
+script. Keys:
+  version         version string to report (default 11.1.3)
+  reject          list of substrings; an argument containing one makes the
+                  fake fail like QEMU does (message on stderr, exit status 1)
+  kvm             false: report that KVM is not enabled
+  migrate_fail    saving state fails with this message
+  incoming_fail   loading state fails with this message
+  agent           true: a guest agent is listening and answers requests
+  ignore_powerdown  true: the guest ignores the power button
+  status          override for query-status once running (e.g. "io-error")
+
+Everything it is asked is appended to `fake-qemu.log` next to this script:
+one line per start ("start <argv>"), per QMP command ("qmp <name> <args>")
+and per guest agent request ("agent <request>").
+"""
+import json, os, signal, socket, sys, threading
+
+here = os.path.dirname(os.path.abspath(__file__))
+conf_path = os.path.join(here, "fake-qemu.conf")
+
+def conf():
+    return json.load(open(conf_path)) if os.path.exists(conf_path) else {}
+
+def log(line):
+    with open(os.path.join(here, "fake-qemu.log"), "a") as f:
+        f.write(line + "\n")
+
+args = sys.argv[1:]
+if "--version" in args:
+    print(f"QEMU emulator version {conf().get('version', '11.1.3')}\nCopyright (c) fake")
+    sys.exit(0)
+if args == ["-machine", "help"]:
+    print("Supported machines are:\npc                   Standard PC (i440FX + PIIX, 1996) (alias of pc-i440fx-11.1)\n"
+          "q35                  Standard PC (Q35 + ICH9, 2009) (alias of pc-q35-11.1)\npc-q35-11.1          Standard PC (Q35 + ICH9, 2009)")
+    sys.exit(0)
+for bad in conf().get("reject", []):
+    if any(bad in a for a in args):
+        print(f"qemu-system-x86_64: fake refusal of '{bad}'", file=sys.stderr)
+        sys.exit(1)
+log("start " + " ".join(args))
+signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+
+def socket_path(option_prefix):
+    """Path of the unix socket in the argument starting with `option_prefix`."""
+    for a in args:
+        if a.startswith(option_prefix):
+            for part in a.split(","):
+                if part.startswith("path="):
+                    return part[5:]
+                if part.startswith("unix:"):
+                    return part[5:]
+    return None
+
+def serve_agent(path):
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(path)
+    server.listen(1)
+    while True:
+        conn, _ = server.accept()
+        stream = conn.makefile("rw")
+        try:
+            for line in stream:
+                log("agent " + line.strip())
+                if conf().get("agent"):
+                    stream.write('{"return": {}}\n')
+                    stream.flush()
+        except OSError:
+            pass
+
+agent_path = socket_path("socket,id=qga0")
+if agent_path:
+    threading.Thread(target=serve_agent, args=(agent_path,), daemon=True).start()
+
+status = "inmigrate" if "-incoming" in args else ("prelaunch" if "-S" in args else "running")
+migration = {}
+server = socket.socket(socket.AF_UNIX)
+server.bind(socket_path("unix:"))
+server.listen(1)
+while True:
+    conn, _ = server.accept()
+    received_fds, named_fds = [], {}
+    def send(obj):
+        conn.sendall((json.dumps(obj) + "\r\n").encode())
+    def lines():
+        """Request lines; descriptors that arrive with them collect in `received_fds`."""
+        pending = b""
+        while True:
+            data, fds, _, _ = socket.recv_fds(conn, 65536, 4)
+            received_fds.extend(fds)
+            if not data:
+                return
+            pending += data
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                yield line.decode()
+    send({"QMP": {"version": {}, "capabilities": []}})
+    try:
+        for line in lines():
+            request = json.loads(line)
+            name, arguments = request["execute"], request.get("arguments", {})
+            if name not in ("qmp_capabilities", "query-status", "query-migrate", "query-chardev"):
+                log(f"qmp {name} {json.dumps(arguments, sort_keys=True)}")
+            c = conf()
+            result = {}
+            if name == "query-kvm":
+                result = {"enabled": c.get("kvm", True), "present": True}
+            elif name == "query-machines":
+                result = [{"name": "pc-i440fx-11.1", "alias": "pc"}, {"name": "pc-q35-11.1", "alias": "q35"}]
+            elif name == "query-status":
+                shown = c.get("status", status) if status == "running" else status
+                result = {"status": shown, "running": shown == "running"}
+            elif name == "query-chardev":
+                result = [{"label": "qga0", "filename": "unix:", "frontend-open": bool(c.get("agent"))}]
+            elif name == "cont":
+                status = "running"
+            elif name == "stop":
+                status = "paused"
+            elif name == "migrate":
+                if "migrate_fail" in c:
+                    migration = {"status": "failed", "error-desc": c["migrate_fail"]}
+                else:
+                    with open(arguments["uri"][len("file:"):], "w") as f:
+                        f.write("FAKE GUEST MEMORY")
+                    migration = {"status": "completed"}
+                    status = "postmigrate"
+            elif name == "migrate-incoming":
+                path = arguments["uri"][len("file:"):]
+                if "incoming_fail" in c:
+                    migration = {"status": "failed", "error-desc": c["incoming_fail"]}
+                elif open(path).read() != "FAKE GUEST MEMORY":
+                    migration = {"status": "failed", "error-desc": "not a saved state"}
+                else:
+                    migration = {"status": "completed"}
+                    status = "paused"
+            elif name == "query-migrate":
+                result = migration
+            elif name == "getfd":
+                if not received_fds:
+                    send({"error": {"class": "GenericError", "desc": "No file descriptor supplied via SCM_RIGHTS"}, "id": request["id"]})
+                    continue
+                named_fds[arguments["fdname"]] = received_fds.pop(0)
+            elif name == "add_client":
+                if "display_fail" in c:
+                    send({"error": {"class": "GenericError", "desc": c["display_fail"]}, "id": request["id"]})
+                    continue
+                # Stands in for QEMU starting to talk D-Bus on the socket it was given.
+                client = socket.socket(fileno=named_fds.pop(arguments["fdname"]))
+                client.sendall(b"FAKE DISPLAY " + arguments["protocol"].encode() + b"\n")
+                display_clients = globals().setdefault("display_clients", [])
+                display_clients.append(client)
+            elif name == "closefd":
+                os.close(named_fds.pop(arguments["fdname"]))
+            elif name == "send-key":
+                send({"event": "RESET", "data": {"guest": True}, "timestamp": {}})
+            send({"return": result, "id": request["id"]})
+            if name == "quit" or (name == "system_powerdown" and not c.get("ignore_powerdown")):
+                os._exit(0)
+    except OSError:
+        pass

@@ -1,0 +1,5 @@
+Name: graphene-gobject-1.0
+Description: type-check stub
+Version: 1.10.8
+Libs: -lgraphene-1.0
+Cflags:

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=roomy
+GenericName=Virtual Machines
+Comment=Simple, reliable virtual machines
+Exec=roomy
+Icon=com.mudlej.Roomy
+Terminal=false
+Categories=System;Emulator;
+Keywords=vm;virtual machine;qemu;kvm;
+StartupNotify=true

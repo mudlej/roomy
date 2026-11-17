@@ -1,0 +1,12 @@
+/target
+__pycache__/
+
+# Lab runs: downloaded guest images, scratch VMs and each run's results.
+/lab/cache/
+/lab/work/
+/lab/results/
+
+# Left behind by makepkg.
+/packaging/arch/pkg/
+/packaging/arch/src/
+/packaging/arch/*.pkg.tar.*
