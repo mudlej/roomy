@@ -92,10 +92,14 @@ appimage: build
     # environment that QEMU or other programs started from here would inherit.
     ln -s usr/bin/roomy "$appdir/AppRun"
 
+    # Built beside the old file and renamed over it: the old one may still be running (a VM's
+    # supervisor outlives the window), and a running file cannot be written to.
+    rm -f "$out.part"
     ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "{{ tools }}/appimagetool-$tool_version" --no-appstream \
-      --runtime-file "{{ tools }}/runtime-$runtime_version" "$appdir" "$out" >"{{ dist }}/appimagetool.log" 2>&1 \
+      --runtime-file "{{ tools }}/runtime-$runtime_version" "$appdir" "$out.part" >"{{ dist }}/appimagetool.log" 2>&1 \
       || { echo "appimage: appimagetool failed; see {{ dist }}/appimagetool.log" >&2; exit 1; }
-    chmod +x "$out"
+    chmod +x "$out.part"
+    mv -f "$out.part" "$out"
     echo "$out ($(du -h "$out" | cut -f1))"
     if command -v objdump >/dev/null 2>&1; then
       needs="$(objdump -T "$appdir/usr/bin/roomy" "$appdir/usr/bin/roomy-gui" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1 || true)"
@@ -106,6 +110,10 @@ appimage: build
 package-arch:
     mkdir -p "{{ dist }}"
     cd "{{ root }}/packaging/arch" && PKGDEST="{{ dist }}" BUILDDIR="{{ root }}/work/makepkg" makepkg -f
+
+# Ask every distribution's project for its current image, as the download window does (needs the network).
+images-check:
+    cargo run --quiet --package roomy -- image check
 
 # The lab-* recipes run against real QEMU and a real guest, inside the box. Each run writes what it saw
 # to work/lab/results/<kind>-<time>/ (SUMMARY.txt first) and points work/lab/results/latest-<kind> at it.

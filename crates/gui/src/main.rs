@@ -18,6 +18,7 @@ macro_rules! on {
 
 mod create;
 mod doctor;
+mod downloads;
 mod fields;
 mod guest;
 mod lab;
@@ -42,6 +43,8 @@ pub struct Context {
     pub roomy_program: PathBuf,
     /// The library file listing the user's VMs.
     pub library: PathBuf,
+    /// Installation images being looked up and downloaded, for as long as the program runs.
+    pub downloads: downloads::Shared,
 }
 
 /// The `roomy` command: named by whoever started us, else next to this program, else on the PATH.
@@ -145,7 +148,9 @@ fn main() -> glib::ExitCode {
     }
     let env = Env::system();
     let context = match (roomy_program(&env), roomy_core::library::default_path()) {
-        (Some(roomy_program), Ok(library)) => Rc::new(Context { env, roomy_program, library }),
+        (Some(roomy_program), Ok(library)) => {
+            Rc::new(Context { env, roomy_program, library, downloads: downloads::Shared::default() })
+        }
         (None, _) => {
             eprintln!("roomy-gui: cannot find the 'roomy' command it belongs to; start the window with 'roomy'");
             return glib::ExitCode::FAILURE;
@@ -177,6 +182,7 @@ fn main() -> glib::ExitCode {
         // The icon filed under the application's name: by the package, or by the lines above.
         gtk::Window::set_default_icon_name(APP_ID);
         let library = library::Library::open(&context, app);
+        downloads::fetch_screenshots(&context);
         if let Some(dir) = lab_dir.clone() {
             lab::run(app, &library, dir);
         }

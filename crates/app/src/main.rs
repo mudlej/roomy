@@ -1,5 +1,6 @@
 //! The `roomy` command.
 
+mod image;
 mod vm;
 
 use roomy_core::doctor::{self, Report};
@@ -25,7 +26,7 @@ Usage:
   roomy vm create --name <name> [--in <folder>] [--os <id>] [--cpus <n>]
                   [--memory <MB>] [--disk <GB>] [--iso <path>] [--from-disk <qcow2>]
                   [--gpu] [--no-network] [--share <name>=<folder>]... [--forward <host>:<guest>]...
-      Create a virtual machine in its own folder (default location: ~/VMs).
+      Create a virtual machine in its own folder (default location: ~/Virtual-Machines).
   roomy vm list                       The virtual machines in your library
   roomy vm set <vm-folder> [--name <name>] [--cpus <n>] [--memory <MB>] [--disk <GB>]
                [--gpu on|off] [--network on|off] [--clipboard on|off] [--microphone on|off]
@@ -44,6 +45,14 @@ Usage:
   roomy vm add <vm-folder>            Add an existing VM folder to your library
   roomy vm forget <vm-folder>         Take a VM off the list, keeping its files
   roomy vm delete <vm-folder> --yes   Delete a VM and its disk permanently
+
+  roomy image list [<system>]
+      The systems roomy can download for you; given one, its editions and
+      their current versions, as each project publishes them.
+  roomy image get <system> [<edition>]
+      Download an installation image into your Downloads folder and check it
+      against its project's checksum. Run it again to carry on an
+      interrupted download.
 
   roomy --version
   roomy --help
@@ -66,6 +75,7 @@ fn main() -> ExitCode {
         "doctor" => run_doctor(rest),
         "setup" => run_setup(rest),
         "vm" => vm::run(rest),
+        "image" => image::run(rest),
         "supervise" => vm::supervise(rest),
         "--version" | "-V" => {
             println!("roomy {}", env!("CARGO_PKG_VERSION"));

@@ -32,6 +32,7 @@ fn a_bare_host_fails_cleanly_and_says_what_to_do() {
             ("firmware", Status::Skipped),
             ("shared-folders", Status::Skipped),
             ("gpu", Status::Skipped),
+            ("downloads", Status::Warning),
         ]
     );
     assert!(!report.can_run_vms());
@@ -45,7 +46,7 @@ fn a_healthy_host_passes_every_trial() {
     let host = FakeHost::healthy("ok");
     let report = doctor::run(&host.env());
     let text = report.to_text();
-    for id in ["cpu", "qemu", "qemu-img", "vm-start", "devices", "firmware", "shared-folders", "gpu"] {
+    for id in ["cpu", "qemu", "qemu-img", "vm-start", "devices", "firmware", "shared-folders", "gpu", "downloads"] {
         assert_eq!(check(&report, id).status, Status::Ok, "{id} in:\n{text}");
     }
     assert!(text.contains("System:       Test Linux\n"), "{text}");

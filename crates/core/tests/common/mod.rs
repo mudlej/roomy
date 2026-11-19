@@ -72,6 +72,7 @@ impl FakeHost {
         host.install("fake-qemu", &host.base.join("bin/qemu-system-x86_64"));
         host.install("fake-qemu-img", &host.base.join("bin/qemu-img"));
         host.install("fake-virtiofsd", &host.base.join("root/usr/lib/virtiofsd"));
+        host.install("fake-curl", &host.base.join("bin/curl"));
         host
     }
 

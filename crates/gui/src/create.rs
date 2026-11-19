@@ -39,8 +39,14 @@ fn chooser_for(title: &str, kind: &str, suffix: &str) -> gtk::FileDialog {
     gtk::FileDialog::builder().title(title).filters(&filters).build()
 }
 
-/// Shows the dialog. `created` is called with the new VM's folder.
-pub fn show(context: &Rc<Context>, parent: &impl IsA<gtk::Widget>, created: impl Fn(Folder) + 'static) {
+/// Shows the dialog, starting from an installation image and the guest system it holds when
+/// `start` names them. `created` is called with the new VM's folder.
+pub fn show(
+    context: &Rc<Context>,
+    parent: &impl IsA<gtk::Widget>,
+    start: Option<(PathBuf, &'static str)>,
+    created: impl Fn(Folder) + 'static,
+) {
     let (host_cpus, host_memory_gb) = host_size(&context.env);
     let page = adw::PreferencesPage::new();
     let form = Form::new("New Virtual Machine", "Create", &page);
@@ -55,8 +61,24 @@ pub fn show(context: &Rc<Context>, parent: &impl IsA<gtk::Widget>, created: impl
     let image_path: Rc<RefCell<Option<PathBuf>>> = Rc::default();
     let image = crate::plain_row("Installation image", "None: start without one");
     image.set_subtitle_lines(1);
+    let download_image = gtk::Button::builder().label("Download…").valign(gtk::Align::Center).build();
     let choose_image = gtk::Button::builder().label("Choose…").valign(gtk::Align::Center).build();
+    image.add_suffix(&download_image);
     image.add_suffix(&choose_image);
+    // Takes an image, and the guest system it holds when that is known.
+    let use_image = {
+        let (image, image_path, system) = (image.clone(), image_path.clone(), system.clone());
+        move |path: PathBuf, guest: Option<&str>| {
+            image.set_subtitle(&path.display().to_string());
+            image_path.replace(Some(path));
+            if let Some(index) = guest.and_then(|guest| catalog::SYSTEMS.iter().position(|system| system.id == guest)) {
+                system.set_selected(index as u32);
+            }
+        }
+    };
+    if let Some((path, guest)) = start {
+        use_image(path, Some(guest));
+    }
 
     let location_path = Rc::new(RefCell::new(library::default_vm_parent().unwrap_or_else(|_| PathBuf::from("."))));
     let location = crate::plain_row("Location", &location_path.borrow().display().to_string());
@@ -130,16 +152,25 @@ pub fn show(context: &Rc<Context>, parent: &impl IsA<gtk::Widget>, created: impl
     });
 
     choose_image.connect_clicked({
-        let (image, image_path) = (image.clone(), image_path.clone());
+        let use_image = use_image.clone();
         move |button| {
             let chooser = chooser_for("Choose an Installation Image", "Installation images (.iso)", "iso");
-            let (image, image_path) = (image.clone(), image_path.clone());
+            let use_image = use_image.clone();
             let window = button.root().and_downcast::<gtk::Window>();
             chooser.open(window.as_ref(), gio::Cancellable::NONE, move |chosen| {
                 if let Some(path) = chosen.ok().and_then(|file| file.path()) {
-                    image.set_subtitle(&path.display().to_string());
-                    image_path.replace(Some(path));
+                    use_image(path, None);
                 }
+            });
+        }
+    });
+    download_image.connect_clicked({
+        let context = context.clone();
+        move |button| {
+            let use_image = use_image.clone();
+            let window = button.root().and_downcast::<gtk::Window>();
+            crate::downloads::show(&context, window.as_ref(), "Use This Image", move |path, guest| {
+                use_image(path, Some(guest))
             });
         }
     });

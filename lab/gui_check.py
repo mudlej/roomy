@@ -167,6 +167,36 @@ def empty_library():
         expect(d, d["window"]["exit_status"] == 0, "the window did not exit cleanly")
 
 
+def download_window():
+    """The window that downloads installation images: it finds Fedora's editions on the real servers."""
+    with step("window:downloads") as d:
+        window = Window("downloads", seconds=180)
+        try:
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 20 and window.alive() and not window.facts():
+                time.sleep(0.25)
+            d["opened"] = window.tell("open", "downloads:fedora")
+            editions = []
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 90 and window.alive():
+                editions = ((window.facts().get("downloads") or {}).get("editions")) or []
+                if editions and "looking" not in editions:
+                    break
+                time.sleep(0.5)
+            d["looked_up_after_s"] = round(time.monotonic() - t0, 1)
+            time.sleep(2)  # let the screenshot arrive and the rows settle
+            d["shot"] = window.shot("fedora")
+            d["facts"] = (window.facts().get("downloads")) or {}
+            found = [e for e in editions if isinstance(e, dict) and "found" in e]
+            d["found"], d["failed"] = len(found), [e["failed"] for e in editions if isinstance(e, dict) and "failed" in e]
+            expect(d, d["opened"], "the window did not open the download window")
+            expect(d, len(found) == len(editions) and found, "not every Fedora edition was found; see facts")
+            expect(d, d["shot"], "the window did not take a picture when asked")
+        finally:
+            d["window"] = window.stop()
+        expect(d, d["window"]["exit_status"] == 0, "the window did not exit cleanly")
+
+
 def main_vm(key, key_pub):
     with step("main:create") as d:
         folder, port, created = ec.create_vm("gui-main", key_pub)
@@ -653,6 +683,7 @@ def run_checks():
             expect(d, session.poll() is None, "no desktop session, and a headless one could not be started")
     if not QUICK:
         empty_library()
+    download_window()
     with step("prepare"):
         ec.require_base_image()
         key, key_pub = ec.new_key(ec.WORK)

@@ -241,6 +241,7 @@ pub fn run(env: &Env) -> Report {
             checks.extend(skipped_trials("no usable QEMU"));
         }
     }
+    checks.push(check_downloads(env));
 
     Report { generated_utc: utc_timestamp(SystemTime::now()), facts, checks }
 }
@@ -387,6 +388,21 @@ fn check_qemu(env: &Env) -> (Check, Option<(PathBuf, Version)>) {
         Err(why) => {
             (Check::new("qemu", TITLE, Status::Failed, format!("{} could not be run: {why}", path.display())), None)
         }
+    }
+}
+
+/// Optional: without curl, VMs still run from images the user brings.
+fn check_downloads(env: &Env) -> Check {
+    const TITLE: &str = "Downloading systems";
+    match env.find_program("curl") {
+        Some(path) => Check::new("downloads", TITLE, Status::Ok, format!("curl found at {}", path.display())),
+        None => Check::new(
+            "downloads",
+            TITLE,
+            Status::Warning,
+            "curl is not installed, so roomy cannot download installation images",
+        )
+        .fix_by_setup(""),
     }
 }
 

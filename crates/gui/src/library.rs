@@ -1,7 +1,7 @@
 //! The main window: the list of virtual machines.
 
 use crate::machine::Machine;
-use crate::{Context, create, doctor};
+use crate::{Context, create, doctor, downloads};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use roomy_core::control::{self, State};
@@ -63,6 +63,7 @@ impl Library {
         let new_button =
             gtk::Button::builder().icon_name("list-add-symbolic").tooltip_text("New virtual machine").build();
         let menu = gio::Menu::new();
+        menu.append(Some("Download a System…"), Some("win.downloads"));
         menu.append(Some("Add Existing…"), Some("win.add-existing"));
         menu.append(Some("Check This Computer…"), Some("win.doctor"));
         let header = adw::HeaderBar::new();
@@ -122,6 +123,11 @@ impl Library {
         let add_existing = gio::SimpleAction::new("add-existing", None);
         add_existing.connect_activate(on!(&library, |this, _, _| this.add_existing()));
         library.window.add_action(&add_existing);
+        let downloads_action = gio::SimpleAction::new("downloads", None);
+        downloads_action.connect_activate(on!(&library, |this, _, _| {
+            this.open_downloads();
+        }));
+        library.window.add_action(&downloads_action);
         let doctor_action = gio::SimpleAction::new("doctor", None);
         doctor_action.connect_activate(on!(&library, |this, _, _| this.check_computer(true)));
         library.window.add_action(&doctor_action);
@@ -172,14 +178,31 @@ impl Library {
     }
 
     fn new_vm(self: &Rc<Self>) {
+        self.new_vm_from(None);
+    }
+
+    /// Opens the "New Virtual Machine" dialog, filled in for an installation image when one is given.
+    fn new_vm_from(self: &Rc<Self>, start: Option<(PathBuf, &'static str)>) {
         create::show(
             &self.context,
             &self.window,
+            start,
             on!(self, |this, folder| {
                 this.refresh();
                 this.open_machine(folder.dir());
             }),
         );
+    }
+
+    /// Opens the window that downloads installation images; a downloaded one leads to a new VM.
+    pub fn open_downloads(self: &Rc<Self>) -> Rc<downloads::Catalog> {
+        let window = self.window.clone().upcast::<gtk::Window>();
+        downloads::show(
+            &self.context,
+            Some(&window),
+            "Create a Virtual Machine",
+            on!(self, |this, path, guest| this.new_vm_from(Some((path, guest)))),
+        )
     }
 
     fn add_existing(self: &Rc<Self>) {

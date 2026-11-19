@@ -55,9 +55,9 @@ impl Cli<'_> {
 fn a_vm_goes_through_its_whole_life_from_the_command_line() {
     let host = FakeHost::healthy("cli");
     let cli = Cli { host: &host };
-    let home_vms = host.base.join("home/VMs");
+    let home_vms = host.base.join("home/Virtual-Machines");
 
-    // Default location is ~/VMs/<name>.
+    // Default location is ~/Virtual-Machines/<name>.
     let created = cli.ok(&["vm", "create", "--name", "Test VM", "--disk", "10", "--forward", "2222:22"]);
     let vm_dir = home_vms.join("Test VM").canonicalize().unwrap();
     assert_eq!(created, format!("Created {}", vm_dir.display()));
@@ -136,7 +136,7 @@ fn the_library_lists_vms_and_deleting_removes_only_roomys_files() {
     let elsewhere = host.base.join("elsewhere");
     cli.ok(&["vm", "create", "--name", "one"]);
     cli.ok(&["vm", "create", "--name", "two", "--in", elsewhere.to_str().unwrap()]);
-    let one = host.base.join("home/VMs/one").canonicalize().unwrap();
+    let one = host.base.join("home/Virtual-Machines/one").canonicalize().unwrap();
     let two = elsewhere.join("two").canonicalize().unwrap();
     let (one_arg, two_arg) = (one.to_str().unwrap(), two.to_str().unwrap());
     let listed = cli.ok(&["vm", "list"]);
@@ -171,7 +171,7 @@ fn the_library_lists_vms_and_deleting_removes_only_roomys_files() {
 
     // A VM whose folder went away stays listed as missing instead of silently vanishing.
     cli.ok(&["vm", "create", "--name", "three"]);
-    std::fs::remove_dir_all(host.base.join("home/VMs/three")).unwrap();
+    std::fs::remove_dir_all(host.base.join("home/Virtual-Machines/three")).unwrap();
     assert!(cli.ok(&["vm", "list"]).starts_with("missing"));
 }
 
@@ -209,7 +209,7 @@ fn settings_change_now_or_at_the_next_boot_and_say_which() {
     let host = FakeHost::healthy("cliset");
     let cli = Cli { host: &host };
     cli.ok(&["vm", "create", "--name", "box", "--disk", "10"]);
-    let dir = host.base.join("home/VMs/box").canonicalize().unwrap();
+    let dir = host.base.join("home/Virtual-Machines/box").canonicalize().unwrap();
     let vm = dir.to_str().unwrap();
     let shared = host.base.join("shared");
     std::fs::create_dir_all(&shared).unwrap();
@@ -248,4 +248,35 @@ fn settings_change_now_or_at_the_next_boot_and_say_which() {
     assert!(config().contains("memory_mb = 8192") && config().contains("network = false"));
     cli.ok(&["vm", "force-off", vm]);
     cli.wait_for_status(vm, "off");
+}
+
+#[test]
+fn the_systems_roomy_can_download_are_listed_and_unreachable_ones_explained() {
+    let host = FakeHost::healthy("cliimage");
+    let cli = Cli { host: &host };
+    let listed = cli.ok(&["image", "list"]);
+    assert!(listed.starts_with("Good first choices:\n  ubuntu        Ubuntu: "), "{listed}");
+    assert!(listed.contains("\n  cachyos       CachyOS: "), "{listed}");
+
+    assert_eq!(
+        cli.err(&["image", "get", "beos"]),
+        "roomy: roomy does not know a system called 'beos' (see: roomy image list)"
+    );
+    assert_eq!(
+        cli.err(&["image", "get", "fedora", "vista"]),
+        "roomy: Fedora has no edition called 'vista' (see: roomy image list fedora)"
+    );
+    assert_eq!(
+        cli.err(&["image", "get", "zorin"]),
+        "roomy: roomy cannot download Zorin OS Core itself; get it from https://zorin.com/os/download/"
+    );
+    // The stand-in curl answers every address as missing: the project's server is named.
+    let offline = cli.err(&["image", "get", "archlinux"]);
+    assert!(
+        offline.starts_with("roomy: cannot read https://geo.mirror.pkgbuild.com/iso/latest/sha256sums.txt: "),
+        "{offline}"
+    );
+    assert!(!host.base.join("home/Downloads").exists(), "nothing is saved when nothing was found");
+
+    assert_eq!(cli.run(&["image"]).status.code(), Some(2));
 }

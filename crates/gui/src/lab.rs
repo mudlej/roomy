@@ -8,6 +8,8 @@
 //!              or `close-dialog`
 //!   pointer    contains `<across> <down>` as fractions of the screen, then optionally `click`: point there
 //!   clipboard  contains text: offer it to the guest as this computer's clipboard
+//!   open       contains `downloads` or `downloads:<system>`: open the download window (showing
+//!              that system); `shot` then also saves `<name>-downloads.png`
 //!   stop       quit
 //!
 //! Each file is removed once obeyed. Also read at startup:
@@ -89,6 +91,7 @@ pub fn run(app: &adw::Application, library: &Rc<Library>, dir: PathBuf) {
         let mut notes: Vec<String> = Vec::new();
         let mut first_frame_at = None::<f64>;
         let mut shots = serde_json::Map::new();
+        let mut catalog: Option<std::rc::Rc<crate::downloads::Catalog>> = None;
         let take = |name: &str| -> Option<String> {
             let path = dir.join(name);
             let text = std::fs::read_to_string(&path).ok()?;
@@ -119,6 +122,21 @@ pub fn run(app: &adw::Application, library: &Rc<Library>, dir: PathBuf) {
                 }
                 if let Some(machine) = &machine {
                     shots.insert(name.clone(), json!({ "bright_area": bright_area(machine.screen()) }));
+                }
+                if let Some(Err(e)) =
+                    catalog.as_ref().map(|c| picture(c.window(), &dir.join(format!("{name}-downloads.png"))))
+                {
+                    notes.push(format!("{name}: downloads picture: {e}"));
+                }
+            }
+            if let Some(what) = take("open") {
+                let mut words = what.splitn(2, ':');
+                if words.next() == Some("downloads") {
+                    let opened = library.open_downloads();
+                    if let Some(system) = words.next() {
+                        opened.select(system);
+                    }
+                    catalog = Some(opened);
                 }
             }
             if let (Some(action), Some(machine)) = (take("action"), &machine) {
@@ -177,6 +195,7 @@ pub fn run(app: &adw::Application, library: &Rc<Library>, dir: PathBuf) {
                 "notes": notes,
                 "shots": shots,
                 "vm": vm,
+                "downloads": catalog.as_ref().map(|catalog| catalog.lab_facts()),
             });
             // Written whole or not at all, so a reader never sees half a file.
             let partial = dir.join("facts.json.partial");

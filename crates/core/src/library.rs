@@ -33,9 +33,9 @@ pub fn default_path() -> Result<PathBuf> {
     Ok(config_home.join("roomy").join("library.toml"))
 }
 
-/// Where new VMs go unless the user picks another place: `~/VMs`.
+/// Where new VMs go unless the user picks another place: `~/Virtual-Machines`.
 pub fn default_vm_parent() -> Result<PathBuf> {
-    Ok(env::home_dir()?.join("VMs"))
+    Ok(env::home_dir()?.join("Virtual-Machines"))
 }
 
 /// The folders in the library, in the order they were added. A library that

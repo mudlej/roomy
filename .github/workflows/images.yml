@@ -1,0 +1,19 @@
+name: Installation images
+
+# Each week, ask every distribution's project for its current image the way the download window
+# does, so that a project changing how it publishes them is noticed before users are.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare
+      - run: just images-check

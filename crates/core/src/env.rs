@@ -98,6 +98,36 @@ pub(crate) fn home_dir() -> Result<PathBuf> {
     dir_from_env("HOME").ok_or_else(|| err!("cannot tell where your home folder is (HOME is not set)"))
 }
 
+/// The user's Downloads folder: the one their desktop names in `user-dirs.dirs`, else `~/Downloads`.
+pub fn downloads_dir() -> Result<PathBuf> {
+    let home = home_dir()?;
+    let config = dir_from_env("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
+    let named =
+        std::fs::read_to_string(config.join("user-dirs.dirs")).ok().and_then(|text| download_dir_in(&text, &home));
+    Ok(named.unwrap_or_else(|| home.join("Downloads")))
+}
+
+/// Where roomy keeps files it can always fetch again: `$XDG_CACHE_HOME/roomy`, by default `~/.cache/roomy`.
+pub fn cache_dir() -> Result<PathBuf> {
+    let cache = match dir_from_env("XDG_CACHE_HOME") {
+        Some(dir) => dir,
+        None => home_dir()?.join(".cache"),
+    };
+    Ok(cache.join("roomy"))
+}
+
+/// `XDG_DOWNLOAD_DIR` in the text of a `user-dirs.dirs` file.
+fn download_dir_in(user_dirs: &str, home: &Path) -> Option<PathBuf> {
+    let value = user_dirs.lines().find_map(|line| line.trim().strip_prefix("XDG_DOWNLOAD_DIR="))?;
+    let value = value.trim().trim_matches('"');
+    let path = match value.strip_prefix("$HOME") {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(value),
+    };
+    // A folder pointed at the home folder itself is one the user switched off.
+    (path.is_absolute() && path != home).then_some(path)
+}
+
 /// The program to start for another `roomy` process that must outlive this one, such as a VM's
 /// supervisor: normally this very program.
 ///
@@ -181,6 +211,19 @@ mod tests {
         assert_eq!(single_file_of(&inside, None, None), None);
         assert_eq!(single_file_of(&inside, some(Path::new("/nonexistent/roomy.AppImage")), some(&mount)), None);
         assert_eq!(single_file_of(&inside, some(&file), some(Path::new("relative/mount"))), None);
+    }
+
+    #[test]
+    fn the_downloads_folder_is_the_one_the_desktop_names() {
+        let home = Path::new("/home/me");
+        let named = |text: &str| download_dir_in(text, home);
+        assert_eq!(
+            named("XDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/Téléchargements\"\n"),
+            Some(home.join("Téléchargements"))
+        );
+        assert_eq!(named("XDG_DOWNLOAD_DIR=\"/data/incoming\""), Some(PathBuf::from("/data/incoming")));
+        assert_eq!(named("XDG_DOWNLOAD_DIR=\"$HOME/\""), None);
+        assert_eq!(named("XDG_MUSIC_DIR=\"$HOME/Music\""), None);
     }
 
     #[test]

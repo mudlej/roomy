@@ -22,6 +22,7 @@ pub const REQUIRED_COMPONENTS: &[&str] = &[
     "UEFI firmware for virtual machines (OVMF / edk2) with its QEMU firmware descriptor",
     "GTK 4.14 or newer and libadwaita 1.5 or newer (for roomy's window)",
     "The PulseAudio client library, libpulse (for sound; PipeWire systems provide it too)",
+    "curl (to download installation images)",
 ];
 
 /// One command of an installation, to be run as root.
@@ -81,7 +82,7 @@ pub enum Advice {
     Unknown,
 }
 
-const ARCH: &[&str] = &["qemu-desktop", "qemu-img", "virtiofsd", "edk2-ovmf", "gtk4", "libadwaita", "libpulse"];
+const ARCH: &[&str] = &["qemu-desktop", "qemu-img", "virtiofsd", "edk2-ovmf", "gtk4", "libadwaita", "libpulse", "curl"];
 
 /// Fedora splits QEMU into one package per module. Two of these are needed by others in the list
 /// without being declared as such there (`qemu-ui-opengl` by the D-Bus display,
@@ -100,6 +101,7 @@ const FEDORA: &[&str] = &[
     "gtk4",
     "libadwaita",
     "pulseaudio-libs",
+    "curl",
 ];
 
 /// openSUSE: nothing pulls in the D-Bus display and audio modules, and the display module needs
@@ -117,6 +119,7 @@ const SUSE: &[&str] = &[
     "libgtk-4-1",
     "libadwaita-1-0",
     "libpulse0",
+    "curl",
 ];
 
 /// Debian and Ubuntu, the QEMU part. `qemu-system-modules-opengl` is where the D-Bus display,
@@ -137,6 +140,7 @@ const APT_OTHER: &[&str] = &[
     "adwaita-icon-theme",
     "librsvg2-common",
     "gsettings-desktop-schemas",
+    "curl",
 ];
 
 /// Never remove anything to make room (`--no-remove`), leave installed packages at their version
@@ -565,7 +569,7 @@ mod tests {
         let plan = install(advice_for("ID=cachyos\nID_LIKE=arch\n", &[], NOBODY));
         assert_eq!(
             plan.command_lines(),
-            ["pacman -Syu --needed qemu-desktop qemu-img virtiofsd edk2-ovmf gtk4 libadwaita libpulse"]
+            ["pacman -Syu --needed qemu-desktop qemu-img virtiofsd edk2-ovmf gtk4 libadwaita libpulse curl"]
         );
         let step = &plan.steps[0];
         assert_eq!(step.unattended[..4], ["pacman", "-Syu", "--needed", "--noconfirm"]);
@@ -635,7 +639,7 @@ mod tests {
             lines[1],
             "apt-get install --no-install-recommends --no-remove -o DPkg::Lock::Timeout=120 --no-upgrade qemu-system-x86 \
              qemu-system-modules-opengl qemu-utils ovmf virtiofsd libgtk-4-1 libadwaita-1-0 libpulse0 libegl1 \
-             adwaita-icon-theme librsvg2-common gsettings-desktop-schemas"
+             adwaita-icon-theme librsvg2-common gsettings-desktop-schemas curl"
         );
         let unattended = plan.steps[1].unattended.join(" ");
         assert!(unattended.starts_with("env DEBIAN_FRONTEND=noninteractive apt-get install -y "), "{unattended}");

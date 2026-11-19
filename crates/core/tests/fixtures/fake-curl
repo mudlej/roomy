@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stand-in for curl in tests: there is no network, so every address is answered as missing.
+echo "curl: (22) The requested URL returned error: 404" >&2
+exit 22
