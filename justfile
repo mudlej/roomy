@@ -134,6 +134,10 @@ lab-gui mode="":
 lab-distro:
     @cd "{{ root }}" && python3 lab/gui_check.py distro
 
+# A FreeBSD guest in the window, about 10 minutes: what works in it, and what the window says does not.
+lab-freebsd:
+    @cd "{{ root }}" && python3 lab/freebsd_check.py
+
 # Which graphics card pairing shows a GPU-accelerated VM correctly.
 lab-gpu:
     @cd "{{ root }}" && python3 lab/gpu_check.py

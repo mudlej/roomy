@@ -1,4 +1,4 @@
-//! The distributions roomy offers to download, and where each project announces its images.
+//! The systems roomy offers to download, and where each project announces its images.
 //!
 //! Only editions that are useful in a virtual machine are listed (no handheld or
 //! graphics-driver builds). An edition roomy cannot check itself is listed with its project's
@@ -6,6 +6,7 @@
 
 use super::Group::{FirstChoices, Popular, Servers, Special, Tinkerers};
 use super::{Distro, Edition, Source};
+use crate::catalog::{self as guest, ARCH_LINUX, DEBIAN, FEDORA, FREEBSD, GuestSystem, LINUX, OPENSUSE};
 
 const EDITIONS: &str = "Editions";
 
@@ -13,7 +14,7 @@ const fn edition(
     name: &'static str,
     slug: &'static str,
     note: &'static str,
-    guest: &'static str,
+    guest: GuestSystem,
     source: Source,
 ) -> Edition {
     Edition { section: EDITIONS, name, slug, note, guest, source }
@@ -24,7 +25,7 @@ const fn in_section(
     name: &'static str,
     slug: &'static str,
     note: &'static str,
-    guest: &'static str,
+    guest: GuestSystem,
     source: Source,
 ) -> Edition {
     Edition { section, name, slug, note, guest, source }
@@ -52,7 +53,7 @@ const fn flavour(
     list: &'static str,
     pattern: &'static str,
 ) -> Edition {
-    in_section(FLAVOURS, name, slug, note, "ubuntu", ubuntu(list, pattern))
+    in_section(FLAVOURS, name, slug, note, guest::UBUNTU, ubuntu(list, pattern))
 }
 
 const fn fedora(
@@ -60,7 +61,7 @@ const fn fedora(
     name: &'static str,
     slug: &'static str,
     note: &'static str,
-    guest: &'static str,
+    guest: GuestSystem,
     variant: &'static str,
     subvariant: &'static str,
 ) -> Edition {
@@ -72,29 +73,29 @@ const ATOMIC: &str = "Atomic desktops";
 const LABS: &str = "Labs";
 
 const fn spin(name: &'static str, slug: &'static str, note: &'static str, subvariant: &'static str) -> Edition {
-    fedora(SPINS, name, slug, note, "fedora", "Spins", subvariant)
+    fedora(SPINS, name, slug, note, FEDORA, "Spins", subvariant)
 }
 
 const fn lab(name: &'static str, slug: &'static str, note: &'static str, subvariant: &'static str) -> Edition {
-    fedora(LABS, name, slug, note, "fedora", "Labs", subvariant)
+    fedora(LABS, name, slug, note, FEDORA, "Labs", subvariant)
 }
 
 // Atomic systems are updated as a whole image, so the usual package managers cannot add the
 // guest helpers: they are marked as a generic Linux guest.
 const fn atomic(name: &'static str, slug: &'static str, note: &'static str, variant: &'static str) -> Edition {
-    fedora(ATOMIC, name, slug, note, "linux", variant, variant)
+    fedora(ATOMIC, name, slug, note, LINUX, variant, variant)
 }
 
 const DEBIAN_LIVE: &str = "https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid/SHA256SUMS";
 
 const fn debian_live(name: &'static str, slug: &'static str, note: &'static str, pattern: &'static str) -> Edition {
-    in_section("Live desktops", name, slug, note, "debian", sums(DEBIAN_LIVE, pattern))
+    in_section("Live desktops", name, slug, note, DEBIAN, sums(DEBIAN_LIVE, pattern))
 }
 
 const MANJARO: &str = "https://manjaro.org/products/download/x86";
 
 const fn manjaro(name: &'static str, slug: &'static str, pattern: &'static str) -> Edition {
-    edition(name, slug, "", "archlinux", Source::PageLink { page: MANJARO, pattern })
+    edition(name, slug, "", ARCH_LINUX, Source::PageLink { page: MANJARO, pattern })
 }
 
 const fn garuda(
@@ -105,13 +106,13 @@ const fn garuda(
     pattern: &'static str,
     fixed: &'static str,
 ) -> Edition {
-    edition(name, slug, note, "archlinux", Source::Sums { list, pattern, fixed: Some(fixed) })
+    edition(name, slug, note, ARCH_LINUX, Source::Sums { list, pattern, fixed: Some(fixed) })
 }
 
 const MINT: &str = "https://mirrors.edge.kernel.org/linuxmint/stable/";
 
 const fn mint(name: &'static str, slug: &'static str, note: &'static str, pattern: &'static str) -> Edition {
-    edition(name, slug, note, "ubuntu", Source::NewestFolder { index: MINT, list: "sha256sum.txt", pattern })
+    edition(name, slug, note, guest::UBUNTU, Source::NewestFolder { index: MINT, list: "sha256sum.txt", pattern })
 }
 
 const ROCKY: &str = "https://download.rockylinux.org/pub/rocky/10/isos/x86_64/CHECKSUM";
@@ -120,6 +121,20 @@ const KALI: &str = "https://cdimage.kali.org/current/SHA256SUMS";
 const VOID: &str = "https://repo-default.voidlinux.org/live/current/sha256sum.txt";
 const BY_NETWORK: &str = "Downloads the rest while installing";
 const NO_DESKTOP: &str = "No desktop";
+
+const fn freebsd(name: &'static str, slug: &'static str, note: &'static str, pattern: &'static str) -> Edition {
+    edition(
+        name,
+        slug,
+        note,
+        FREEBSD,
+        Source::NewestFolder {
+            index: "https://download.freebsd.org/releases/amd64/amd64/ISO-IMAGES/",
+            list: "CHECKSUM.SHA256-FreeBSD-{version}-RELEASE-amd64",
+            pattern,
+        },
+    )
+}
 
 pub static DISTROS: &[Distro] = &[
     Distro {
@@ -131,8 +146,8 @@ pub static DISTROS: &[Distro] = &[
         desktop: "GNOME",
         site: "https://ubuntu.com",
         editions: &[
-            edition("Desktop", "desktop", "", "ubuntu", ubuntu(UBUNTU, "ubuntu-*-desktop-amd64.iso")),
-            edition("Server", "server", NO_DESKTOP, "ubuntu", ubuntu(UBUNTU, "ubuntu-*-live-server-amd64.iso")),
+            edition("Desktop", "desktop", "", guest::UBUNTU, ubuntu(UBUNTU, "ubuntu-*-desktop-amd64.iso")),
+            edition("Server", "server", NO_DESKTOP, guest::UBUNTU, ubuntu(UBUNTU, "ubuntu-*-live-server-amd64.iso")),
             flavour(
                 "Kubuntu",
                 "kubuntu",
@@ -207,14 +222,14 @@ pub static DISTROS: &[Distro] = &[
         desktop: "GNOME, KDE Plasma and many more",
         site: "https://fedoraproject.org",
         editions: &[
-            fedora(EDITIONS, "Workstation", "workstation", "GNOME", "fedora", "Workstation", "Workstation"),
-            fedora(EDITIONS, "KDE Plasma Desktop", "kde", "KDE Plasma", "fedora", "KDE", "KDE"),
+            fedora(EDITIONS, "Workstation", "workstation", "GNOME", FEDORA, "Workstation", "Workstation"),
+            fedora(EDITIONS, "KDE Plasma Desktop", "kde", "KDE Plasma", FEDORA, "KDE", "KDE"),
             in_section(
                 EDITIONS,
                 "Server",
                 "server",
                 NO_DESKTOP,
-                "fedora",
+                FEDORA,
                 Source::Fedora { variant: "Server", subvariant: "Server", link: "-dvd-" },
             ),
             fedora(
@@ -222,7 +237,7 @@ pub static DISTROS: &[Distro] = &[
                 "Everything",
                 "everything",
                 "A small network installer: choose everything while installing",
-                "fedora",
+                FEDORA,
                 "Everything",
                 "Everything",
             ),
@@ -268,7 +283,7 @@ pub static DISTROS: &[Distro] = &[
                 "LMDE",
                 "lmde",
                 "Cinnamon on Debian",
-                "debian",
+                DEBIAN,
                 sums("https://mirrors.edge.kernel.org/linuxmint/debian/sha256sum.txt", "lmde-*-cinnamon-64bit.iso"),
             ),
         ],
@@ -281,7 +296,7 @@ pub static DISTROS: &[Distro] = &[
         about: "Based on Ubuntu. Offers a desktop layout that looks like the system you came from.",
         desktop: "GNOME, reshaped",
         site: "https://zorin.com/os/",
-        editions: &[edition("Core", "core", "", "ubuntu", website("https://zorin.com/os/download/"))],
+        editions: &[edition("Core", "core", "", guest::UBUNTU, website("https://zorin.com/os/download/"))],
     },
     Distro {
         id: "elementary",
@@ -291,7 +306,7 @@ pub static DISTROS: &[Distro] = &[
         about: "Its own Pantheon desktop and apps, designed together, with a store of curated apps.",
         desktop: "Pantheon",
         site: "https://elementary.io",
-        editions: &[edition("Standard", "standard", "", "ubuntu", website("https://elementary.io"))],
+        editions: &[edition("Standard", "standard", "", guest::UBUNTU, website("https://elementary.io"))],
     },
     Distro {
         id: "popos",
@@ -301,7 +316,13 @@ pub static DISTROS: &[Distro] = &[
         about: "Based on Ubuntu, with System76’s new desktop COSMIC and window tiling built in.",
         desktop: "COSMIC",
         site: "https://system76.com/pop/",
-        editions: &[edition("Standard", "standard", "", "ubuntu", Source::Pop { release: "24.04", channel: "intel" })],
+        editions: &[edition(
+            "Standard",
+            "standard",
+            "",
+            guest::UBUNTU,
+            Source::Pop { release: "24.04", channel: "intel" },
+        )],
     },
     Distro {
         id: "debian",
@@ -325,7 +346,7 @@ pub static DISTROS: &[Distro] = &[
                 "Network installer",
                 "netinst",
                 BY_NETWORK,
-                "debian",
+                DEBIAN,
                 sums(
                     "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/SHA256SUMS",
                     "debian-*-amd64-netinst.iso",
@@ -347,7 +368,7 @@ pub static DISTROS: &[Distro] = &[
                 "Tumbleweed",
                 "tumbleweed",
                 "",
-                "opensuse",
+                OPENSUSE,
                 Source::Sums {
                     list: "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-DVD-x86_64-Current.iso.sha256",
                     pattern: "openSUSE-Tumbleweed-DVD-x86_64-*-Media.iso",
@@ -361,7 +382,7 @@ pub static DISTROS: &[Distro] = &[
                 "Tumbleweed network installer",
                 "tumbleweed-net",
                 BY_NETWORK,
-                "opensuse",
+                OPENSUSE,
                 Source::Sums {
                     list: "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-NET-x86_64-Current.iso.sha256",
                     pattern: "openSUSE-Tumbleweed-NET-x86_64-*-Media.iso",
@@ -375,7 +396,7 @@ pub static DISTROS: &[Distro] = &[
                 "Leap",
                 "leap",
                 "A new release every year or so",
-                "opensuse",
+                OPENSUSE,
                 website("https://get.opensuse.org/leap/"),
             ),
         ],
@@ -392,7 +413,7 @@ pub static DISTROS: &[Distro] = &[
             "Desktop",
             "desktop",
             "Choose the desktop while installing",
-            "archlinux",
+            ARCH_LINUX,
             Source::PageLink {
                 page: "https://cachyos.org/download/",
                 pattern: "https://iso.cachyos.org/desktop/*/cachyos-desktop-linux-*.iso",
@@ -411,7 +432,7 @@ pub static DISTROS: &[Distro] = &[
             "Bazzite",
             "standard",
             "Pick the edition on the website",
-            "linux",
+            LINUX,
             website("https://bazzite.gg/#image-picker"),
         )],
     },
@@ -427,7 +448,7 @@ pub static DISTROS: &[Distro] = &[
             "User Edition",
             "user",
             "",
-            "ubuntu",
+            guest::UBUNTU,
             sums(
                 "https://files.kde.org/neon/images/desk/user/current/neon-user-desk-current.sha256sum",
                 "neon-user-desk-*-*.iso",
@@ -503,7 +524,7 @@ pub static DISTROS: &[Distro] = &[
             "MX Linux",
             "standard",
             "Pick the desktop on the website",
-            "debian",
+            DEBIAN,
             website("https://mxlinux.org/download-links/"),
         )],
     },
@@ -519,7 +540,7 @@ pub static DISTROS: &[Distro] = &[
             "Standard",
             "standard",
             "",
-            "linux",
+            LINUX,
             Source::GitHub { repo: "Vanilla-OS/live-iso", pattern: "Vanilla-OS-*-stable-amd64.*.iso" },
         )],
     },
@@ -535,7 +556,7 @@ pub static DISTROS: &[Distro] = &[
             "Solus",
             "standard",
             "Pick the desktop on the website",
-            "linux",
+            LINUX,
             website("https://getsol.us/download/"),
         )],
     },
@@ -551,7 +572,7 @@ pub static DISTROS: &[Distro] = &[
             "Standard",
             "standard",
             "",
-            "archlinux",
+            ARCH_LINUX,
             sums("https://geo.mirror.pkgbuild.com/iso/latest/sha256sums.txt", "archlinux-*-x86_64.iso"),
         )],
     },
@@ -563,7 +584,7 @@ pub static DISTROS: &[Distro] = &[
         about: "Arch Linux itself, installed with a graphical installer and a few helpful tools.",
         desktop: "You choose while installing",
         site: "https://endeavouros.com",
-        editions: &[edition("Standard", "standard", "", "archlinux", website("https://endeavouros.com/#Download"))],
+        editions: &[edition("Standard", "standard", "", ARCH_LINUX, website("https://endeavouros.com/#Download"))],
     },
     Distro {
         id: "nixos",
@@ -574,8 +595,8 @@ pub static DISTROS: &[Distro] = &[
         desktop: "GNOME or KDE Plasma",
         site: "https://nixos.org",
         editions: &[
-            edition("Graphical", "graphical", "", "linux", Source::NixOs { kind: "graphical" }),
-            edition("Minimal", "minimal", NO_DESKTOP, "linux", Source::NixOs { kind: "minimal" }),
+            edition("Graphical", "graphical", "", LINUX, Source::NixOs { kind: "graphical" }),
+            edition("Minimal", "minimal", NO_DESKTOP, LINUX, Source::NixOs { kind: "minimal" }),
         ],
     },
     Distro {
@@ -587,12 +608,12 @@ pub static DISTROS: &[Distro] = &[
         desktop: "None; you choose",
         site: "https://www.gentoo.org",
         editions: &[
-            edition("Minimal", "minimal", NO_DESKTOP, "linux", Source::Gentoo { prefix: "install-amd64-minimal-" }),
+            edition("Minimal", "minimal", NO_DESKTOP, LINUX, Source::Gentoo { prefix: "install-amd64-minimal-" }),
             edition(
                 "LiveGUI",
                 "livegui",
                 "KDE Plasma, to try it first",
-                "linux",
+                LINUX,
                 Source::Gentoo { prefix: "livegui-amd64-" },
             ),
         ],
@@ -606,8 +627,8 @@ pub static DISTROS: &[Distro] = &[
         desktop: "Xfce or none",
         site: "https://voidlinux.org",
         editions: &[
-            edition("Base", "base", NO_DESKTOP, "linux", sums(VOID, "void-live-x86_64-*-base.iso")),
-            edition("Xfce", "xfce", "", "linux", sums(VOID, "void-live-x86_64-*-xfce.iso")),
+            edition("Base", "base", NO_DESKTOP, LINUX, sums(VOID, "void-live-x86_64-*-base.iso")),
+            edition("Xfce", "xfce", "", LINUX, sums(VOID, "void-live-x86_64-*-xfce.iso")),
         ],
     },
     Distro {
@@ -619,19 +640,13 @@ pub static DISTROS: &[Distro] = &[
         desktop: "None",
         site: "https://alpinelinux.org",
         editions: &[
-            edition(
-                "Virtual",
-                "virtual",
-                "Made for virtual machines",
-                "linux",
-                Source::Alpine { flavor: "alpine-virt" },
-            ),
-            edition("Standard", "standard", "", "linux", Source::Alpine { flavor: "alpine-standard" }),
+            edition("Virtual", "virtual", "Made for virtual machines", LINUX, Source::Alpine { flavor: "alpine-virt" }),
+            edition("Standard", "standard", "", LINUX, Source::Alpine { flavor: "alpine-standard" }),
             edition(
                 "Extended",
                 "extended",
                 "More packages, no network needed",
-                "linux",
+                LINUX,
                 Source::Alpine { flavor: "alpine-extended" },
             ),
         ],
@@ -645,9 +660,9 @@ pub static DISTROS: &[Distro] = &[
         desktop: "GNOME or none",
         site: "https://rockylinux.org",
         editions: &[
-            edition("Boot", "boot", BY_NETWORK, "fedora", sums(ROCKY, "Rocky-*-x86_64-boot.iso")),
-            edition("Minimal", "minimal", "", "fedora", sums(ROCKY, "Rocky-*-x86_64-minimal.iso")),
-            edition("DVD", "dvd", "Everything, no network needed", "fedora", sums(ROCKY, "Rocky-*-x86_64-dvd1.iso")),
+            edition("Boot", "boot", BY_NETWORK, FEDORA, sums(ROCKY, "Rocky-*-x86_64-boot.iso")),
+            edition("Minimal", "minimal", "", FEDORA, sums(ROCKY, "Rocky-*-x86_64-minimal.iso")),
+            edition("DVD", "dvd", "Everything, no network needed", FEDORA, sums(ROCKY, "Rocky-*-x86_64-dvd1.iso")),
         ],
     },
     Distro {
@@ -659,9 +674,9 @@ pub static DISTROS: &[Distro] = &[
         desktop: "GNOME or none",
         site: "https://almalinux.org",
         editions: &[
-            edition("Boot", "boot", BY_NETWORK, "fedora", sums(ALMA, "AlmaLinux-*-x86_64-boot.iso")),
-            edition("Minimal", "minimal", "", "fedora", sums(ALMA, "AlmaLinux-*-x86_64-minimal.iso")),
-            edition("DVD", "dvd", "Everything, no network needed", "fedora", sums(ALMA, "AlmaLinux-*-x86_64-dvd.iso")),
+            edition("Boot", "boot", BY_NETWORK, FEDORA, sums(ALMA, "AlmaLinux-*-x86_64-boot.iso")),
+            edition("Minimal", "minimal", "", FEDORA, sums(ALMA, "AlmaLinux-*-x86_64-minimal.iso")),
+            edition("DVD", "dvd", "Everything, no network needed", FEDORA, sums(ALMA, "AlmaLinux-*-x86_64-dvd.iso")),
         ],
     },
     Distro {
@@ -672,6 +687,20 @@ pub static DISTROS: &[Distro] = &[
         about: "Based on Debian, with hundreds of tools for penetration testing already installed.",
         desktop: "Xfce",
         site: "https://www.kali.org",
-        editions: &[edition("Installer", "installer", "", "debian", sums(KALI, "kali-linux-*-installer-amd64.iso"))],
+        editions: &[edition("Installer", "installer", "", DEBIAN, sums(KALI, "kali-linux-*-installer-amd64.iso"))],
+    },
+    Distro {
+        id: "freebsd",
+        name: "FreeBSD",
+        group: Tinkerers,
+        tagline: "The best-known BSD, made as one complete system",
+        about: "Not a Linux: its kernel, tools and manuals are developed together as one system. It starts at a text console, and a desktop is yours to add from its packages.",
+        desktop: "None; you choose",
+        site: "https://www.freebsd.org",
+        editions: &[
+            freebsd("Installer", "disc1", "", "FreeBSD-*-RELEASE-amd64-disc1.iso"),
+            freebsd("Installer with packages", "dvd1", "No network needed", "FreeBSD-*-RELEASE-amd64-dvd1.iso"),
+            freebsd("Network installer", "bootonly", BY_NETWORK, "FreeBSD-*-RELEASE-amd64-bootonly.iso"),
+        ],
     },
 ];

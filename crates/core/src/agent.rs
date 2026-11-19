@@ -28,6 +28,10 @@ pub enum ClockSync {
     Failed(String),
 }
 
+/// In the agent's error when only its last step failed: copying the clock, already set, to the
+/// guest's hardware clock with Linux's `hwclock`. FreeBSD's agent fails there every time.
+const HARDWARE_CLOCK_STEP: &str = "set hardware clock to system time";
+
 pub struct Agent {
     socket: PathBuf,
     stream: Option<UnixStream>,
@@ -63,7 +67,12 @@ impl Agent {
             Ok(Some(line)) => match serde_json::from_str::<Value>(&line) {
                 Ok(reply) if reply.get("return").is_some() => ClockSync::Synced,
                 Ok(reply) => {
-                    ClockSync::Failed(reply["error"]["desc"].as_str().unwrap_or("the agent refused").to_owned())
+                    let why = reply["error"]["desc"].as_str().unwrap_or("the agent refused");
+                    if why.contains(HARDWARE_CLOCK_STEP) {
+                        ClockSync::Synced
+                    } else {
+                        ClockSync::Failed(why.to_owned())
+                    }
                 }
                 Err(_) => ClockSync::Failed(format!("unexpected answer from the agent: {}", line.trim())),
             },

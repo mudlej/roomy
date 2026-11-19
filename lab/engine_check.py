@@ -164,11 +164,11 @@ def expect(d, condition, why):
         d.setdefault("why", why)
 
 
-def ssh_command(key, port, cmd):
+def ssh_command(key, port, cmd, user="arch"):
     """The ssh command line that runs `cmd` in a lab guest whose SSH port is forwarded to `port` here."""
     return ["ssh", "-F", "/dev/null", "-i", key, "-p", str(port), "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
-            "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR", "arch@127.0.0.1", cmd]
+            "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR", f"{user}@127.0.0.1", cmd]
 
 
 def clock_lag(guest):
@@ -181,11 +181,11 @@ def clock_lag(guest):
 
 
 class Guest:
-    def __init__(self, folder, port, key):
-        self.folder, self.port, self.key = str(folder), port, key
+    def __init__(self, folder, port, key, user="arch"):
+        self.folder, self.port, self.key, self.user = str(folder), port, key, user
 
     def ssh(self, cmd, timeout=30, input=None):
-        return sh(ssh_command(self.key, self.port, cmd), timeout=timeout, input=input)
+        return sh(ssh_command(self.key, self.port, cmd, self.user), timeout=timeout, input=input)
 
     def g(self, cmd, timeout=30):
         r = self.ssh(cmd + " 2>&1", timeout=timeout)
@@ -260,11 +260,12 @@ def new_key(folder):
     return key, Path(key + ".pub").read_text().strip()
 
 
-def make_seed(iso, hostname, key_pub):
-    """Write a cloud-init seed image at `iso` that names the guest and lets `key_pub` in over SSH."""
+def make_seed(iso, hostname, key_pub, first_boot=""):
+    """Write a cloud-init seed image at `iso` that names the guest and lets `key_pub` in over SSH.
+    `first_boot` is added to the settings the guest reads at its first boot."""
     folder = Path(iso).with_suffix("")
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "user-data").write_text(f"#cloud-config\nssh_pwauth: false\nssh_authorized_keys:\n  - {key_pub}\n")
+    (folder / "user-data").write_text(f"#cloud-config\nssh_pwauth: false\nssh_authorized_keys:\n  - {key_pub}\n{first_boot}")
     (folder / "meta-data").write_text(f"instance-id: {hostname}-{TS}\nlocal-hostname: {hostname}\n")
     r = sh(["xorriso", "-as", "mkisofs", "-output", str(iso), "-volid", "CIDATA", "-joliet", "-rock",
             str(folder / "user-data"), str(folder / "meta-data")])
@@ -272,13 +273,14 @@ def make_seed(iso, hostname, key_pub):
         raise RuntimeError(f"xorriso failed: {r}")
 
 
-def create_vm(name, key_pub, extra=()):
-    """Create a VM from the cloud image with a cloud-init seed that installs our SSH key."""
+def create_vm(name, key_pub, extra=(), system="archlinux", image=None, first_boot=""):
+    """Create a VM from a cloud image (the Arch one unless `image` is given) with a cloud-init seed that
+    installs our SSH key and whatever else `first_boot` asks for."""
     seed = WORK / f"seed-{name}.iso"
-    make_seed(seed, name, key_pub)
+    make_seed(seed, name, key_pub, first_boot)
     port = free_port()
-    r = roomy("vm", "create", "--name", name, "--in", WORK / "vms", "--os", "archlinux", "--cpus", 4, "--memory", 4096,
-              "--disk", 20, "--from-disk", BASE_IMAGE, "--iso", seed, "--forward", f"{port}:22", *extra)
+    r = roomy("vm", "create", "--name", name, "--in", WORK / "vms", "--os", system, "--cpus", 4, "--memory", 4096,
+              "--disk", 20, "--from-disk", image or BASE_IMAGE, "--iso", seed, "--forward", f"{port}:22", *extra)
     if r["rc"] != 0:
         raise RuntimeError(f"create failed: {r}")
     folder = WORK / "vms" / name

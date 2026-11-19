@@ -4,6 +4,7 @@ use crate::machine::Machine;
 use crate::{Context, create, doctor, downloads};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use roomy_core::catalog::GuestSystem;
 use roomy_core::control::{self, State};
 use roomy_core::library;
 use roomy_core::vm::{Config, Folder};
@@ -182,7 +183,7 @@ impl Library {
     }
 
     /// Opens the "New Virtual Machine" dialog, filled in for an installation image when one is given.
-    fn new_vm_from(self: &Rc<Self>, start: Option<(PathBuf, &'static str)>) {
+    pub fn new_vm_from(self: &Rc<Self>, start: Option<(PathBuf, GuestSystem)>) {
         create::show(
             &self.context,
             &self.window,
@@ -200,6 +201,7 @@ impl Library {
         downloads::show(
             &self.context,
             Some(&window),
+            None,
             "Create a Virtual Machine",
             on!(self, |this, path, guest| this.new_vm_from(Some((path, guest)))),
         )

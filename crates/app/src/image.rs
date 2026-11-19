@@ -1,6 +1,7 @@
 //! `roomy image`: installation images roomy finds and downloads for the user.
 
 use crate::{EXIT_PROBLEMS, usage_error};
+use roomy_core::catalog::Family;
 use roomy_core::env::{self, Env};
 use roomy_core::images::download::{Download, Progress};
 use roomy_core::images::{self, Curl, DISTROS, Distro, Group, Image, Remembering, resolve_all, size_words};
@@ -49,14 +50,26 @@ fn describe(image: &Image) -> String {
 }
 
 fn list() {
-    for group in Group::ALL {
-        println!("{}:", group.title());
-        for distro in DISTROS.iter().filter(|distro| distro.group == group) {
-            println!("  {:<13} {}: {}", distro.id, distro.name, distro.tagline);
+    for family in Family::ALL {
+        for group in Group::ALL {
+            let listed: Vec<_> =
+                DISTROS.iter().filter(|distro| distro.family() == family && distro.group == group).collect();
+            if listed.is_empty() {
+                continue;
+            }
+            println!("{}, {}:", family.label(), lower_first(group.title()));
+            for distro in listed {
+                println!("  {:<13} {}: {}", distro.id, distro.name, distro.tagline);
+            }
+            println!();
         }
-        println!();
     }
     println!("'{} image list <system>' shows a system's editions and their current versions.", env::roomy_command());
+}
+
+fn lower_first(words: &str) -> String {
+    let mut letters = words.chars();
+    letters.next().map(|first| first.to_lowercase().chain(letters).collect()).unwrap_or_default()
 }
 
 fn show(system: &str) -> ExitCode {

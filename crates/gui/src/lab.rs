@@ -3,13 +3,14 @@
 //! shows, and obeys these files a test script may drop into it:
 //!
 //!   shot       contains a name: save pictures `<name>-library.png` and `<name>-vm.png`
-//!   type       contains text: type it into the VM
+//!   type       contains text: type it into the VM, a line break being the Enter key
 //!   action     contains the name of a VM window action to carry out (`settings`, `guest-setup`, ...),
 //!              or `close-dialog`
 //!   pointer    contains `<across> <down>` as fractions of the screen, then optionally `click`: point there
 //!   clipboard  contains text: offer it to the guest as this computer's clipboard
 //!   open       contains `downloads` or `downloads:<system>`: open the download window (showing
-//!              that system); `shot` then also saves `<name>-downloads.png`
+//!              that system); `shot` then also saves `<name>-downloads.png`. Or `create:<guest
+//!              system>`: open the "New Virtual Machine" dialog as an image of that system leads to it
 //!   stop       quit
 //!
 //! Each file is removed once obeyed. Also read at startup:
@@ -92,12 +93,13 @@ pub fn run(app: &adw::Application, library: &Rc<Library>, dir: PathBuf) {
         let mut first_frame_at = None::<f64>;
         let mut shots = serde_json::Map::new();
         let mut catalog: Option<std::rc::Rc<crate::downloads::Catalog>> = None;
-        let take = |name: &str| -> Option<String> {
+        let take_as_written = |name: &str| -> Option<String> {
             let path = dir.join(name);
             let text = std::fs::read_to_string(&path).ok()?;
             let _ = std::fs::remove_file(&path);
-            Some(text.trim().to_owned())
+            Some(text)
         };
+        let take = |name: &str| take_as_written(name).map(|text| text.trim().to_owned());
 
         glib::timeout_future(Duration::from_millis(1500)).await;
         let machine = std::env::var_os("ROOMY_GUI_LAB_VM").and_then(|vm| library.open_machine(Path::new(&vm)));
@@ -138,6 +140,9 @@ pub fn run(app: &adw::Application, library: &Rc<Library>, dir: PathBuf) {
                     }
                     catalog = Some(opened);
                 }
+                if let Some(system) = what.strip_prefix("create:").and_then(roomy_core::catalog::known) {
+                    library.new_vm_from(Some((PathBuf::from("/lab/installation-image.iso"), system)));
+                }
             }
             if let (Some(action), Some(machine)) = (take("action"), &machine) {
                 if action == "close-dialog" {
@@ -159,7 +164,7 @@ pub fn run(app: &adw::Application, library: &Rc<Library>, dir: PathBuf) {
             if let (Some(text), Some(machine)) = (take("clipboard"), &machine) {
                 machine.lab_offer_clipboard(&text);
             }
-            if let (Some(text), Some(machine)) = (take("type"), &machine) {
+            if let (Some(text), Some(machine)) = (take_as_written("type"), &machine) {
                 for code in text.chars().filter_map(key_for) {
                     machine.tap_key(code);
                     glib::timeout_future(Duration::from_millis(40)).await;

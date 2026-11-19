@@ -13,6 +13,7 @@
 //!   logs/                  output of QEMU and helpers from the latest run
 //! ```
 
+use crate::catalog::{self, Feature, GuestSystem};
 use crate::env::Env;
 use crate::error::Context;
 use crate::host;
@@ -95,6 +96,38 @@ pub struct PortForward {
 }
 
 impl Config {
+    /// The guest system this VM is marked as; an identifier roomy does not know counts as any Linux.
+    pub fn system(&self) -> GuestSystem {
+        catalog::known(&self.os).unwrap_or(catalog::LINUX)
+    }
+
+    pub fn asks_for(&self, feature: Feature) -> bool {
+        match feature {
+            Feature::GpuAcceleration => self.features.gpu_acceleration,
+            Feature::Clipboard => self.features.clipboard,
+            Feature::SharedFolders => !self.shared_folders.is_empty(),
+            Feature::ScreenResizing => false,
+        }
+    }
+
+    /// Refuses what this VM asks of its guest system that the system cannot give. What `before`,
+    /// the same VM under the same system, already asked for is let through, so that such a VM
+    /// keeps working and can still be told to stop asking.
+    pub(crate) fn fit_guest_system(&mut self, before: Option<&Config>) -> Result<()> {
+        let system = self.system();
+        let before = before.filter(|before| before.os == self.os);
+        // Clipboard sharing is on unless switched off: a newly chosen system that cannot do it goes without.
+        if before.is_none() && !system.offers(Feature::Clipboard) {
+            self.features.clipboard = false;
+        }
+        for feature in Feature::ALL {
+            if self.asks_for(feature) && !before.is_some_and(|before| before.asks_for(feature)) {
+                system.require(feature)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn parse(text: &str) -> Result<Config> {
         let schema =
             text.parse::<toml::Table>().ok().and_then(|table| table.get("schema").and_then(toml::Value::as_integer));
@@ -317,8 +350,9 @@ pub fn create(env: &Env, parent: &Path, new: NewVm) -> Result<Folder> {
     let qemu_path = env.require(host::QEMU_PROGRAM)?;
     let qemu_img = env.require("qemu-img")?;
     let firmware = host::require_firmware(env)?;
+    catalog::chosen(&new.os)?;
 
-    let config = Config {
+    let mut config = Config {
         schema: SCHEMA,
         id: random_uuid()?,
         name: new.name.trim().to_owned(),
@@ -333,6 +367,7 @@ pub fn create(env: &Env, parent: &Path, new: NewVm) -> Result<Folder> {
         shared_folders: new.shared_folders,
         port_forwards: new.port_forwards,
     };
+    config.fit_guest_system(None)?;
     config.validate()?;
     if new.disk_gb == 0 {
         return Err(err!("the disk needs a size of at least 1 GB"));

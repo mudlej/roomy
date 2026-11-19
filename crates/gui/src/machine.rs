@@ -269,6 +269,7 @@ impl Machine {
             "waiting_for_next_boot": self.waiting.borrow().clone(),
             "other_graphics_card": self.other_card.get(),
             "guest_agent": self.guest_agent.get(),
+            "install_helpers": self.config.borrow().system().install_helpers,
             "pointer_absolute": self.pointer_absolute.get(),
             "pointed_at": self.lab_pointed_at.get(),
             "guest_copied": self.lab_guest_copied.borrow().clone(),

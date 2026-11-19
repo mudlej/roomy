@@ -2,12 +2,14 @@
 
 use crate::Context;
 use crate::fields::{
-    Amount, FeatureSwitches, Form, Holder, PortForwards, SHARED_FOLDERS_IN_THE_GUEST, SharedFolders, host_size,
+    Amount, FeatureSwitches, Form, Holder, PortForwards, SHARED_FOLDERS_IN_THE_GUEST, SharedFolders, SystemRow,
+    host_size,
 };
 use adw::prelude::*;
 use gtk::{gio, glib};
+use roomy_core::catalog::{self, GuestSystem};
 use roomy_core::vm::{self, Features, Folder, NewVm};
-use roomy_core::{catalog, host, library};
+use roomy_core::{host, library};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -44,7 +46,7 @@ fn chooser_for(title: &str, kind: &str, suffix: &str) -> gtk::FileDialog {
 pub fn show(
     context: &Rc<Context>,
     parent: &impl IsA<gtk::Widget>,
-    start: Option<(PathBuf, &'static str)>,
+    start: Option<(PathBuf, GuestSystem)>,
     created: impl Fn(Folder) + 'static,
 ) {
     let (host_cpus, host_memory_gb) = host_size(&context.env);
@@ -55,8 +57,7 @@ pub fn show(
     create.set_sensitive(false);
 
     let name = adw::EntryRow::builder().title("Name").build();
-    let system = adw::ComboRow::builder().title("Guest system").build();
-    system.set_model(Some(&gtk::StringList::new(&catalog::SYSTEMS.map(|system| system.label))));
+    let system = SystemRow::new(catalog::LINUX);
 
     let image_path: Rc<RefCell<Option<PathBuf>>> = Rc::default();
     let image = crate::plain_row("Installation image", "None: start without one");
@@ -68,11 +69,11 @@ pub fn show(
     // Takes an image, and the guest system it holds when that is known.
     let use_image = {
         let (image, image_path, system) = (image.clone(), image_path.clone(), system.clone());
-        move |path: PathBuf, guest: Option<&str>| {
+        move |path: PathBuf, guest: Option<GuestSystem>| {
             image.set_subtitle(&path.display().to_string());
             image_path.replace(Some(path));
-            if let Some(index) = guest.and_then(|guest| catalog::SYSTEMS.iter().position(|system| system.id == guest)) {
-                system.set_selected(index as u32);
+            if let Some(guest) = guest {
+                system.choose(guest);
             }
         }
     };
@@ -88,7 +89,7 @@ pub fn show(
 
     let general = adw::PreferencesGroup::new();
     general.add(&name);
-    general.add(&system);
+    general.add(&system.row);
     general.add(&image);
     general.add(&location);
 
@@ -109,14 +110,14 @@ pub fn show(
     hardware.add(&memory.row);
     hardware.add(&disk.row);
 
-    let switches = FeatureSwitches::new(&Features::default());
+    let switches = Rc::new(FeatureSwitches::new(&Features::default()));
     let features = adw::PreferencesGroup::builder().title("Features").build();
     features.add(&switches.gpu);
     features.add(&switches.network);
     features.add(&switches.clipboard);
     features.add(&switches.microphone);
 
-    let shared = SharedFolders::new(Vec::new(), SHARED_FOLDERS_IN_THE_GUEST);
+    let shared = Rc::new(SharedFolders::new(Vec::new(), SHARED_FOLDERS_IN_THE_GUEST));
 
     let existing_path: Rc<RefCell<Option<PathBuf>>> = Rc::default();
     let existing = crate::plain_row("Start from an existing disk", DISK_STARTS_EMPTY);
@@ -139,6 +140,14 @@ pub fn show(
     let forwards = PortForwards::new(Holder::Expander(advanced.clone()), Vec::new(), complain.clone());
     let advanced_group = adw::PreferencesGroup::new();
     advanced_group.add(&advanced);
+
+    system.on_choice({
+        let (switches, shared) = (switches.clone(), shared.clone());
+        move |system| {
+            switches.fit(&system, |_| false);
+            shared.fit(&system, |_| false);
+        }
+    });
 
     page.add(&general);
     page.add(&hardware);
@@ -165,11 +174,12 @@ pub fn show(
         }
     });
     download_image.connect_clicked({
-        let context = context.clone();
+        let (context, system) = (context.clone(), system.clone());
         move |button| {
             let use_image = use_image.clone();
             let window = button.root().and_downcast::<gtk::Window>();
-            crate::downloads::show(&context, window.as_ref(), "Use This Image", move |path, guest| {
+            let family = Some(system.chosen().family);
+            crate::downloads::show(&context, window.as_ref(), family, "Use This Image", move |path, guest| {
                 use_image(path, Some(guest))
             });
         }
@@ -224,7 +234,7 @@ pub fn show(
         move |create| {
             let new = NewVm {
                 name: name.text().trim().to_owned(),
-                os: catalog::SYSTEMS.get(system.selected() as usize).map_or("linux", |system| system.id).to_owned(),
+                os: system.chosen().id.to_owned(),
                 cpus: cpus.value() as u32,
                 memory_mb: (memory.value() * 1024.0).round() as u64,
                 disk_gb: disk.value() as u64,

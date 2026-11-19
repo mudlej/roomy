@@ -3,9 +3,10 @@
 use crate::machine::SUSPEND_UNAVAILABLE_WITH_GPU;
 use adw::prelude::*;
 use gtk::gio;
+use roomy_core::catalog::{self, Feature, GuestSystem};
 use roomy_core::env::Env;
+use roomy_core::host;
 use roomy_core::vm::{Features, PortForward, SharedFolder};
-use roomy_core::{catalog, host};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -56,6 +57,45 @@ impl Form {
     }
 }
 
+/// The row that chooses the guest system. It also says what the chosen one cannot do.
+#[derive(Clone)]
+pub struct SystemRow {
+    pub row: adw::ComboRow,
+}
+
+impl SystemRow {
+    pub fn new(chosen: GuestSystem) -> SystemRow {
+        let row = adw::ComboRow::builder().title("Guest system").subtitle_lines(3).build();
+        row.set_use_markup(false);
+        row.set_model(Some(&gtk::StringList::new(&catalog::SYSTEMS.map(|system| system.label))));
+        let this = SystemRow { row };
+        this.choose(chosen);
+        this
+    }
+
+    pub fn chosen(&self) -> GuestSystem {
+        catalog::SYSTEMS.get(self.row.selected() as usize).copied().unwrap_or(catalog::LINUX)
+    }
+
+    pub fn choose(&self, system: GuestSystem) {
+        if let Some(index) = catalog::SYSTEMS.iter().position(|each| *each == system) {
+            self.row.set_selected(index as u32);
+        }
+    }
+
+    /// Calls `fit` with the chosen system, now and whenever another is chosen.
+    pub fn on_choice(&self, fit: impl Fn(GuestSystem) + 'static) {
+        let this = self.clone();
+        let chose = move || {
+            let system = this.chosen();
+            this.row.set_subtitle(&system.limits().unwrap_or_default());
+            fit(system);
+        };
+        chose();
+        self.row.connect_selected_notify(move |_| chose());
+    }
+}
+
 /// A switch for each of a VM's features.
 pub struct FeatureSwitches {
     pub gpu: adw::SwitchRow,
@@ -81,13 +121,23 @@ impl FeatureSwitches {
         }
     }
 
-    /// The features as the switches are set.
+    /// Shows the switches for what the guest system can do, and for what `kept` names although
+    /// it cannot: what a VM already has on, so that it is not switched off unseen.
+    pub fn fit(&self, system: &GuestSystem, kept: impl Fn(Feature) -> bool) {
+        for (switch, feature) in [(&self.gpu, Feature::GpuAcceleration), (&self.clipboard, Feature::Clipboard)] {
+            switch.set_visible(system.offers(feature) || kept(feature));
+        }
+    }
+
+    /// The features as the switches are set. A switch that is not shown counts as off, and keeps
+    /// its position for when it is shown again.
     pub fn get(&self) -> Features {
+        let on = |switch: &adw::SwitchRow| switch.get_visible() && switch.is_active();
         Features {
-            gpu_acceleration: self.gpu.is_active(),
-            network: self.network.is_active(),
-            clipboard: self.clipboard.is_active(),
-            microphone: self.microphone.is_active(),
+            gpu_acceleration: on(&self.gpu),
+            network: on(&self.network),
+            clipboard: on(&self.clipboard),
+            microphone: on(&self.microphone),
         }
     }
 }
@@ -351,8 +401,14 @@ impl SharedFolders {
         SharedFolders { group, list }
     }
 
+    /// As [`FeatureSwitches::fit`], for the whole group.
+    pub fn fit(&self, system: &GuestSystem, kept: impl Fn(Feature) -> bool) {
+        self.group.set_visible(system.offers(Feature::SharedFolders) || kept(Feature::SharedFolders));
+    }
+
+    /// The folders to share: none while the group is not shown.
     pub fn get(&self) -> Vec<SharedFolder> {
-        self.list.items.borrow().clone()
+        if self.group.get_visible() { self.list.items.borrow().clone() } else { Vec::new() }
     }
 }
 

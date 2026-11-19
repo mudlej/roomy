@@ -5,6 +5,7 @@
 //! with which of the two it was, so the user is never left guessing whether
 //! a restart is needed.
 
+use crate::catalog;
 use crate::control::{self, Request, State};
 use crate::env::Env;
 use crate::vm::{self, Config, Folder, PortForward, SharedFolder};
@@ -24,6 +25,8 @@ pub enum Applies {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Changes {
     pub name: Option<String>,
+    /// The guest system's identifier.
+    pub os: Option<String>,
     pub cpus: Option<u32>,
     pub memory_mb: Option<u64>,
     pub gpu_acceleration: Option<bool>,
@@ -58,6 +61,10 @@ pub fn disk_gb(env: &Env, folder: &Folder, config: &Config) -> Result<u64> {
 /// Nothing is saved unless every change is valid and every immediate change worked.
 pub fn apply(env: &Env, folder: &Folder, changes: &Changes) -> Result<Vec<Applied>> {
     let mut config = folder.load()?;
+    let before = config.clone();
+    if let Some(os) = &changes.os {
+        catalog::chosen(os)?;
+    }
     let state = control::status(env, folder);
     if matches!(state, State::Starting | State::Suspending | State::Stopping) {
         return Err(err!("the virtual machine is {}; try again in a moment", state.word()));
@@ -81,12 +88,17 @@ pub fn apply(env: &Env, folder: &Folder, changes: &Changes) -> Result<Vec<Applie
         };
     }
     set!(config.name, &changes.name.as_ref().map(|n| n.trim().to_owned()), "name", Applies::Now);
+    set!(config.os, &changes.os, "guest system", Applies::Now);
     set!(config.cpus, &changes.cpus, "processors", hardware);
     set!(config.memory_mb, &changes.memory_mb, "memory", hardware);
     set!(config.features.gpu_acceleration, &changes.gpu_acceleration, "GPU acceleration", hardware);
     set!(config.shared_folders, &changes.shared_folders, "shared folders", hardware);
     set!(config.port_forwards, &changes.port_forwards, "forwarded ports", hardware);
-    set!(config.features.clipboard, &changes.clipboard, "clipboard sharing", Applies::Now);
+    config.features.clipboard = changes.clipboard.unwrap_or(config.features.clipboard);
+    config.fit_guest_system(Some(&before))?;
+    if config.features.clipboard != before.features.clipboard {
+        done("clipboard sharing", Applies::Now, None);
+    }
     set!(config.features.microphone, &changes.microphone, "microphone", Applies::Now);
     let network_changed = changes.network.is_some_and(|on| on != config.features.network);
     if let Some(on) = changes.network.filter(|_| network_changed) {

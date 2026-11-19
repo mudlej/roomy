@@ -114,14 +114,19 @@ pub fn version_in(file_name: &str) -> String {
     stem.split('-').find(|part| part.starts_with(|c: char| c.is_ascii_digit())).unwrap_or_default().to_owned()
 }
 
-/// The highest version among the folders an index page links to, such as `22.3/` on Linux Mint's
-/// mirror. Only names made of digits and dots count.
-pub fn newest_folder(index_html: &str) -> Option<String> {
-    links(index_html)
+/// The folders an index page links to that are named by a version, such as `22.3/` on Linux
+/// Mint's mirror, the highest version first. Only names of digits and dots that start with a
+/// digit count, which leaves out the link to the folder above (`../`).
+pub fn newest_folders(index_html: &str) -> Vec<String> {
+    let mut folders: Vec<String> = links(index_html)
         .into_iter()
         .filter_map(|link| link.trim_start_matches("./").strip_suffix('/').map(str::to_owned))
-        .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_digit() || c == '.'))
-        .max_by(|a, b| version_order(a, b))
+        .filter(|name| name.starts_with(|c: char| c.is_ascii_digit()))
+        .filter(|name| name.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .collect();
+    folders.sort_by(|a, b| version_order(b, a));
+    folders.dedup();
+    folders
 }
 
 /// Every `href="…"` on a web page.
@@ -352,9 +357,9 @@ mod tests {
     }
 
     #[test]
-    fn index_pages_give_their_newest_numbered_folder() {
+    fn index_pages_give_their_numbered_folders_newest_first() {
         let html = r#"<a href="../">..</a><a href="21.3/">21.3/</a><a href="22.3/">22.3/</a><a href="22/">22/</a><a href="./9.9/">x</a><a href="beta/">"#;
-        assert_eq!(newest_folder(html).as_deref(), Some("22.3"));
+        assert_eq!(newest_folders(html), ["22.3", "22", "21.3", "9.9"]);
     }
 
     #[test]

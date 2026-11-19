@@ -120,6 +120,17 @@ fn mistakes_on_the_command_line_are_explained() {
         cli.err(&["vm", "create", "--name", "x", "--cpus", "many"]),
         "roomy: --cpus: 'many' is not a valid number"
     );
+    assert_eq!(
+        cli.err(&["vm", "create", "--name", "x", "--os", "beos"]),
+        "roomy: roomy does not know a guest system called 'beos'; it knows: linux, archlinux, debian, fedora, \
+         opensuse, ubuntu, freebsd"
+    );
+    assert!(cli.ok(&["--help"]).contains("One of: linux, archlinux, debian, fedora, opensuse, ubuntu, freebsd.\n"));
+    assert_eq!(
+        cli.err(&["vm", "create", "--name", "x", "--os", "freebsd", "--gpu"]),
+        "roomy: a FreeBSD guest cannot use GPU acceleration: FreeBSD has no driver for a virtual machine's \
+         accelerated graphics"
+    );
     let not_a_vm = cli.err(&["vm", "status", host.base.to_str().unwrap()]);
     assert!(not_a_vm.contains("is not a roomy virtual machine"), "{not_a_vm}");
     let unknown = cli.run(&["vm", "frobnicate", "/tmp"]);
@@ -231,6 +242,12 @@ fn settings_change_now_or_at_the_next_boot_and_say_which() {
     assert!(cli.err(&["vm", "set", vm, "--gpu", "maybe"]).contains("'on' or 'off'"));
     assert!(config().contains("name = \"box\"") && config().contains("cpus = 6"));
 
+    // The guest system can be changed, once the VM asks for nothing the new one lacks.
+    assert!(cli.err(&["vm", "set", vm, "--os", "freebsd"]).contains("a FreeBSD guest cannot use shared folders"));
+    let moved = cli.ok(&["vm", "set", vm, "--os", "freebsd", "--unshare", "docs"]);
+    assert!(moved.contains("guest system: changed") && moved.contains("clipboard sharing: changed"), "{moved}");
+    assert_eq!(cli.ok(&["vm", "set", vm, "--name", "box"]), "nothing to change");
+
     // Running: the network switch and the disk act at once, hardware waits for the next boot.
     cli.ok(&["vm", "start", vm]);
     let running =
@@ -255,8 +272,9 @@ fn the_systems_roomy_can_download_are_listed_and_unreachable_ones_explained() {
     let host = FakeHost::healthy("cliimage");
     let cli = Cli { host: &host };
     let listed = cli.ok(&["image", "list"]);
-    assert!(listed.starts_with("Good first choices:\n  ubuntu        Ubuntu: "), "{listed}");
+    assert!(listed.starts_with("Linux, good first choices:\n  ubuntu        Ubuntu: "), "{listed}");
     assert!(listed.contains("\n  cachyos       CachyOS: "), "{listed}");
+    assert!(listed.contains("\n\nBSD, for tinkerers:\n  freebsd       FreeBSD: "), "{listed}");
 
     assert_eq!(
         cli.err(&["image", "get", "beos"]),

@@ -105,11 +105,7 @@ def main():
     ec.start_run("gpu")
     try:
         if os.environ.get("ROOMY_LAB_SKIP_BUILD") != "1":
-            with step("build") as d:
-                r = sh("cargo build --release --workspace > '%s' 2>&1; echo rc=$?" % (ec.OUT / "build.log"), timeout=1800)
-                d["cargo"] = r["out"].strip()
-                expect(d, "rc=0" in d["cargo"] and gc.GUI.is_file(), "the build failed; see build.log")
-            if not ec.REPORT["steps"][-1]["ok"]:
+            if not gc.build():
                 return
             with step("tests") as d:
                 r = sh("cargo test --workspace > '%s' 2>&1; echo rc=$?" % (ec.OUT / "tests.log"), timeout=1800)

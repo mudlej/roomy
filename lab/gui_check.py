@@ -84,6 +84,13 @@ class Window:
     def alive(self):
         return self.process.poll() is None
 
+    def wait_for_facts(self, timeout=20):
+        """Seconds until the window has reported anything, or until it gave up waiting."""
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout and self.alive() and not self.facts():
+            time.sleep(0.25)
+        return round(time.monotonic() - t0, 2)
+
     def tell(self, kind, text, timeout=20):
         """Drop a trigger file and wait until the window has obeyed it."""
         target = self.dir / kind
@@ -151,11 +158,7 @@ def empty_library():
     with step("window:empty-library") as d:
         window = Window("empty", seconds=60)
         try:
-            d["facts_after_s"] = None
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < 20 and window.alive() and not window.facts():
-                time.sleep(0.25)
-            d["facts_after_s"] = round(time.monotonic() - t0, 2)
+            d["facts_after_s"] = window.wait_for_facts()
             time.sleep(2)  # let the doctor finish
             d["shot"] = window.shot("empty")
             d["facts"] = window.facts()
@@ -167,15 +170,13 @@ def empty_library():
         expect(d, d["window"]["exit_status"] == 0, "the window did not exit cleanly")
 
 
-def download_window():
-    """The window that downloads installation images: it finds Fedora's editions on the real servers."""
+def download_window(system="fedora"):
+    """The window that downloads installation images: it finds a system's editions on the real servers."""
     with step("window:downloads") as d:
         window = Window("downloads", seconds=180)
         try:
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < 20 and window.alive() and not window.facts():
-                time.sleep(0.25)
-            d["opened"] = window.tell("open", "downloads:fedora")
+            window.wait_for_facts()
+            d["opened"] = window.tell("open", f"downloads:{system}")
             editions = []
             t0 = time.monotonic()
             while time.monotonic() - t0 < 90 and window.alive():
@@ -185,12 +186,13 @@ def download_window():
                 time.sleep(0.5)
             d["looked_up_after_s"] = round(time.monotonic() - t0, 1)
             time.sleep(2)  # let the screenshot arrive and the rows settle
-            d["shot"] = window.shot("fedora")
+            d["shot"] = window.shot(system)
             d["facts"] = (window.facts().get("downloads")) or {}
             found = [e for e in editions if isinstance(e, dict) and "found" in e]
             d["found"], d["failed"] = len(found), [e["failed"] for e in editions if isinstance(e, dict) and "failed" in e]
             expect(d, d["opened"], "the window did not open the download window")
-            expect(d, len(found) == len(editions) and found, "not every Fedora edition was found; see facts")
+            expect(d, d["facts"].get("selected") == system, f"the download window does not show {system}")
+            expect(d, len(found) == len(editions) and found, f"not every edition of {system} was found; see facts")
             expect(d, d["shot"], "the window did not take a picture when asked")
         finally:
             d["window"] = window.stop()
@@ -328,6 +330,40 @@ exec sleep 100000
 """
 
 
+def pointer_reaches_guest(d, window, guest):
+    """Points the window at two places, clicking at the second, and expects the guest's pointer device to
+    have reported both and the click. Something in the guest must already be writing what `evtest` hears
+    from that device to /tmp/pointer.txt, for the next 6 seconds."""
+    places = []
+    for across, down, click in ((0.25, 0.5, ""), (0.75, 0.25, " click")):
+        d[f"obeyed_{across}"] = window.tell("pointer", f"{across} {down}{click}")
+        time.sleep(1.2)  # the window writes its facts twice a second
+        places.append({"asked": [across, down], "guest_pixel": shows(window).get("pointed_at"),
+                       "picture_size": window.vm().get("picture_size")})
+    time.sleep(4)  # until the listener in the guest has finished
+    heard = guest.g("grep -E 'ABS_X|ABS_Y|BTN_LEFT' /tmp/pointer.txt | grep -v 'Event code' | tail -n 60")
+    d["heard_tail"] = heard[-1500:]
+    d["listener"] = guest.g("wc -l < /tmp/pointer.txt; head -n 4 /tmp/pointer.txt; echo ...; tail -n 4 /tmp/pointer.txt")[-1500:]
+    seen = {"ABS_X": [], "ABS_Y": [], "BTN_LEFT": []}
+    for line in heard.splitlines():
+        for name in seen:
+            if f"({name})" in line and "value" in line:
+                with contextlib.suppress(ValueError):
+                    seen[name].append(int(line.rsplit("value", 1)[1].strip()))
+    d["places"], d["seen"] = places, {name: values[-6:] for name, values in seen.items()}
+    expect(d, all(place["guest_pixel"] and place["picture_size"] for place in places),
+           "the window could not tell which guest pixel it pointed at")
+    if d.get("ok", True) is False:
+        return
+    for index, name in ((0, "ABS_X"), (1, "ABS_Y")):
+        for place in places:
+            wanted = place["guest_pixel"][index] / place["picture_size"][index] * TABLET_AXIS_MAX
+            place.setdefault("wanted_on_guest_scale", []).append(round(wanted))
+            expect(d, any(abs(value - wanted) <= 0.02 * TABLET_AXIS_MAX for value in seen[name]),
+                   f"the guest never saw the pointer at {name} near {round(wanted)} (it saw {seen[name][-6:]})")
+    expect(d, 1 in seen["BTN_LEFT"] and 0 in seen["BTN_LEFT"], "the click did not arrive in the guest")
+
+
 def desktop_features(window, guest, folder):
     """The pointer and the clipboard, which need more in the guest than a text console offers."""
     with step("main:pointer") as d:
@@ -341,36 +377,10 @@ def desktop_features(window, guest, folder):
         guest.ssh("sudo sh -c 'for e in /dev/input/event*; do nohup timeout 7 stdbuf -oL evtest $e > /tmp/heard-$(basename $e).txt 2>&1 "
                   "< /dev/null & done'")
         guest.ssh(f"sudo sh -c 'nohup timeout 7 stdbuf -oL evtest /dev/input/{device} > /tmp/pointer.txt 2>&1 < /dev/null &'; sleep 1.5")
-        places = []
-        for across, down, click in ((0.25, 0.5, ""), (0.75, 0.25, " click")):
-            d[f"obeyed_{across}"] = window.tell("pointer", f"{across} {down}{click}")
-            time.sleep(1.2)  # the window writes its facts twice a second
-            places.append({"asked": [across, down], "guest_pixel": shows(window).get("pointed_at"),
-                           "picture_size": window.vm().get("picture_size")})
-        time.sleep(4)  # until the listener in the guest has finished
-        heard = guest.g("grep -E 'ABS_X|ABS_Y|BTN_LEFT' /tmp/pointer.txt | grep -v 'Event code' | tail -n 60")
-        d["heard_tail"] = heard[-1500:]
+        expect(d, bool(device), "the guest has no pointer device from roomy")
+        pointer_reaches_guest(d, window, guest)
         d["heard_per_device"] = guest.g("grep -c '^Event: ' /tmp/heard-event*.txt")
         d["qemu_trace"] = sh("grep -aE 'dbus_mouse|input_event|input_mouse_mode' '%s' | tail -n 30" % (folder / "logs" / "qemu.log"))["out"][-3000:]
-        d["listener"] = guest.g("wc -l < /tmp/pointer.txt; head -n 4 /tmp/pointer.txt; echo ...; tail -n 4 /tmp/pointer.txt")[-1500:]
-        seen = {"ABS_X": [], "ABS_Y": [], "BTN_LEFT": []}
-        for line in heard.splitlines():
-            for name in seen:
-                if f"({name})" in line and "value" in line:
-                    with contextlib.suppress(ValueError):
-                        seen[name].append(int(line.rsplit("value", 1)[1].strip()))
-        d["places"], d["seen"] = places, {name: values[-6:] for name, values in seen.items()}
-        expect(d, bool(device), "the guest has no pointer device from roomy")
-        expect(d, all(place["guest_pixel"] and place["picture_size"] for place in places),
-               "the window could not tell which guest pixel it pointed at")
-        if d.get("ok", True) is not False:
-            for index, name in ((0, "ABS_X"), (1, "ABS_Y")):
-                for place in places:
-                    wanted = place["guest_pixel"][index] / place["picture_size"][index] * TABLET_AXIS_MAX
-                    place.setdefault("wanted_on_guest_scale", []).append(round(wanted))
-                    expect(d, any(abs(value - wanted) <= 0.02 * TABLET_AXIS_MAX for value in seen[name]),
-                           f"the guest never saw the pointer at {name} near {round(wanted)} (it saw {seen[name][-6:]})")
-            expect(d, 1 in seen["BTN_LEFT"] and 0 in seen["BTN_LEFT"], "the click did not arrive in the guest")
         d["problems"] = window.vm().get("problems")
 
     with step("main:clipboard") as d:
@@ -570,6 +580,16 @@ def package():
             expect(d, path in d["contents"], f"the package lacks {path}")
 
 
+def build():
+    """Builds roomy as a step, with the compiler's output in build.log. Whether it worked."""
+    with step("build") as d:
+        r = sh("cargo build --release --workspace > '%s' 2>&1; echo rc=$?" % (ec.OUT / "build.log"), timeout=1800)
+        d["cargo"] = r["out"].strip()
+        d["tail"] = sh(["tail", "-n", "40", str(ec.OUT / "build.log")])["out"]
+        expect(d, "rc=0" in d["cargo"] and GUI.is_file(), "the build failed; see build.log")
+    return ec.REPORT["steps"][-1]["ok"]
+
+
 def main():
     ec.start_run(KIND)
     session = None
@@ -581,13 +601,7 @@ def main():
             if on_this_distribution():
                 session = run_checks()
             return
-        with step("build") as d:
-            # Keep the full compiler output in build.log.
-            r = sh("cargo build --release --workspace > '%s' 2>&1; echo rc=$?" % (ec.OUT / "build.log"), timeout=1800)
-            d["cargo"] = r["out"].strip()
-            d["tail"] = sh(["tail", "-n", "40", str(ec.OUT / "build.log")])["out"]
-            expect(d, "rc=0" in d["cargo"] and GUI.is_file(), "the build failed; see build.log")
-        build_ok = ec.REPORT["steps"][-1]["ok"]
+        build_ok = build()
         if APPIMAGE and build_ok:
             with step("appimage") as d:
                 image = SINGLE_FILE

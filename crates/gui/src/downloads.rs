@@ -1,4 +1,5 @@
-//! The "Download a System" window: the distributions roomy can fetch, each with its editions.
+//! The "Download a System" window: the systems roomy can fetch, one family (Linux, BSD) at a
+//! time, each with its editions.
 //!
 //! Downloads belong to [`Shared`], which lives as long as the program, so closing the window does
 //! not stop them; opening it again shows how they are going.
@@ -6,11 +7,12 @@
 use crate::Context;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use roomy_core::catalog::{Family, GuestSystem};
 use roomy_core::env;
 use roomy_core::images::download::{self, Download, Progress};
 use roomy_core::images::{self, Curl, DISTROS, Distro, Edition, Group, Image, Remembering, size_words};
 use serde_json::json;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -78,6 +80,7 @@ const LOGOS: &[(&str, &[u8])] = &[
     ("elementary", include_bytes!("../data/logos/elementary.png")),
     ("endeavouros", include_bytes!("../data/logos/endeavouros.png")),
     ("fedora", include_bytes!("../data/logos/fedora.png")),
+    ("freebsd", include_bytes!("../data/logos/freebsd.png")),
     ("garudalinux", include_bytes!("../data/logos/garudalinux.png")),
     ("gentoo", include_bytes!("../data/logos/gentoo.png")),
     ("kalilinux", include_bytes!("../data/logos/kalilinux.png")),
@@ -186,6 +189,9 @@ pub struct Catalog {
     toasts: adw::ToastOverlay,
     split: adw::NavigationSplitView,
     list: gtk::ListBox,
+    family: Cell<Family>,
+    /// The button that lists each family; none in a window that is for one family only.
+    families: Vec<(Family, gtk::ToggleButton)>,
     sidebar: Vec<SidebarRow>,
     content: adw::NavigationPage,
     scroller: gtk::ScrolledWindow,
@@ -194,16 +200,34 @@ pub struct Catalog {
     /// Where images are saved, as the desktop names it.
     downloads_dir: Option<PathBuf>,
     use_label: &'static str,
-    on_use: Box<dyn Fn(PathBuf, &'static str)>,
+    on_use: Box<dyn Fn(PathBuf, GuestSystem)>,
 }
 
-/// Opens the window. A downloaded image's last button is labelled `use_label`; pressing it closes
-/// the window and calls `on_use` with the image and the guest system it holds.
+fn family_switch(shown: Family) -> (gtk::Box, Vec<(Family, gtk::ToggleButton)>) {
+    let families: Vec<(Family, gtk::ToggleButton)> = Family::ALL
+        .into_iter()
+        .map(|each| (each, gtk::ToggleButton::builder().label(each.label()).active(each == shown).build()))
+        .collect();
+    let switch = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    switch.add_css_class("linked");
+    for (_, button) in &families {
+        if !std::ptr::eq(button, &families[0].1) {
+            button.set_group(Some(&families[0].1));
+        }
+        switch.append(button);
+    }
+    (switch, families)
+}
+
+/// Opens the window. It lists the systems of the family `only`, or without one those of every
+/// family, a switch choosing which. A downloaded image's last button is labelled `use_label`;
+/// pressing it closes the window and calls `on_use` with the image and the guest system it holds.
 pub fn show(
     context: &Rc<Context>,
     parent: Option<&gtk::Window>,
+    only: Option<Family>,
     use_label: &'static str,
-    on_use: impl Fn(PathBuf, &'static str) + 'static,
+    on_use: impl Fn(PathBuf, GuestSystem) + 'static,
 ) -> Rc<Catalog> {
     let window = adw::Window::builder().title("Download a System").default_width(1040).default_height(760).build();
     window.set_transient_for(parent);
@@ -221,8 +245,22 @@ pub fn show(
     let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sidebar_box.append(&search);
     sidebar_box.append(&gtk::ScrolledWindow::builder().vexpand(true).child(&list).build());
+    let family = only.unwrap_or(Family::ALL[0]);
+    let sidebar_header = adw::HeaderBar::new();
+    let families = match only {
+        Some(family) => {
+            let title = adw::WindowTitle::new(&format!("{} systems", family.label()), "");
+            sidebar_header.set_title_widget(Some(&title));
+            Vec::new()
+        }
+        None => {
+            let (switch, families) = family_switch(family);
+            sidebar_header.set_title_widget(Some(&switch));
+            families
+        }
+    };
     let sidebar_view = adw::ToolbarView::new();
-    sidebar_view.add_top_bar(&adw::HeaderBar::new());
+    sidebar_view.add_top_bar(&sidebar_header);
     sidebar_view.set_content(Some(&sidebar_box));
 
     let scroller = gtk::ScrolledWindow::builder().vexpand(true).build();
@@ -248,6 +286,8 @@ pub fn show(
         toasts,
         split,
         list,
+        family: Cell::new(family),
+        families,
         sidebar,
         content,
         scroller,
@@ -279,6 +319,15 @@ pub fn show(
         this.list.invalidate_headers();
         this.refresh_sidebar();
     }));
+    for (family, button) in &catalog.families {
+        let family = *family;
+        button.connect_toggled(on!(&catalog, |this, button| {
+            // Also called when `select` presses the button in, with the family already shown.
+            if button.is_active() && this.family.get() != family {
+                this.select_first_of(family);
+            }
+        }));
+    }
 
     // Each window keeps itself until it is closed; everything else holds it weakly.
     let keep = RefCell::new(Some(catalog.clone()));
@@ -297,7 +346,7 @@ pub fn show(
         }
     });
 
-    catalog.select(DISTROS[0].id);
+    catalog.select_first_of(family);
     catalog.window.present();
     catalog
 }
@@ -343,16 +392,33 @@ impl Catalog {
         crate::toast(&self.toasts, message, 8);
     }
 
-    /// Whether the distribution at `index` fits the search, by its own words or an edition's.
+    /// Whether the system at `index` is listed: one of the family shown that fits the search, by
+    /// its own words or an edition's.
     fn matches(&self, index: usize) -> bool {
         let query = self.query.borrow();
         let Some(distro) = DISTROS.get(index) else { return false };
-        query.is_empty() || words_fit(distro, &query) || found_edition(distro, &query).is_some()
+        distro.family() == self.family.get()
+            && (query.is_empty() || words_fit(distro, &query) || found_edition(distro, &query).is_some())
     }
 
-    /// Shows a distribution on the right, and starts finding its editions' current images.
+    fn select_first_of(self: &Rc<Self>, family: Family) {
+        if let Some(first) = DISTROS.iter().find(|distro| distro.family() == family) {
+            self.select(first.id);
+        }
+    }
+
+    /// Shows a system on the right, with its family's systems listed on the left, and starts
+    /// finding its editions' current images. Not a system of a family this window leaves out.
     pub fn select(self: &Rc<Self>, id: &str) {
         let Some((index, distro)) = DISTROS.iter().enumerate().find(|(_, distro)| distro.id == id) else { return };
+        let family = distro.family();
+        if family != self.family.get() {
+            let Some((_, button)) = self.families.iter().find(|(each, _)| *each == family) else { return };
+            self.family.set(family);
+            self.list.invalidate_filter();
+            self.list.invalidate_headers();
+            button.set_active(true);
+        }
         if let Some(row) = self.list.row_at_index(index as i32) {
             self.list.select_row(Some(&row));
         }
@@ -715,6 +781,7 @@ impl Catalog {
             })
             .collect();
         json!({
+            "family": self.family.get().label(),
             "selected": shown.distro.id,
             "editions": editions,
             "screenshot": shown.frame.is_visible(),

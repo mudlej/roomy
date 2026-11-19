@@ -6,7 +6,7 @@ style. Every logo is a trademark of
 its project and is shown only to name that project.
 
 Logo artwork from [Simple Icons](https://simpleicons.org) 15.0.0 (CC0 1.0), drawn in each brand's colour from
-Simple Icons' data: almalinux, alpinelinux, archlinux, debian, elementary, endeavouros, fedora, gentoo, kalilinux,
+Simple Icons' data: almalinux, alpinelinux, archlinux, debian, elementary, endeavouros, fedora, freebsd, gentoo, kalilinux,
 kdeneon, linuxmint, manjaro, mxlinux, nixos, opensuse, popos, rockylinux, solus, ubuntu, voidlinux, zorin.
 
 From Wikimedia Commons:

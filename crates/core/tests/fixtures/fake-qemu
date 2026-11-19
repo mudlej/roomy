@@ -11,7 +11,8 @@ script. Keys:
   kvm             false: report that KVM is not enabled
   migrate_fail    saving state fails with this message
   incoming_fail   loading state fails with this message
-  agent           true: a guest agent is listening and answers requests
+  agent           true: a guest agent is listening and answers requests;
+                  a text: it refuses each request with that text
   status          override for query-status once running (e.g. "io-error")
   display_fail    opening a display connection fails with this message
 
@@ -75,8 +76,10 @@ def serve_agent(path):
         try:
             for line in stream:
                 log("agent " + line.strip())
-                if conf().get("agent"):
-                    stream.write('{"return": {}}\n')
+                answer = conf().get("agent")
+                if answer:
+                    refusal = {"error": {"class": "GenericError", "desc": answer}}
+                    stream.write(json.dumps({"return": {}} if answer is True else refusal) + "\n")
                     stream.flush()
         except OSError:
             pass

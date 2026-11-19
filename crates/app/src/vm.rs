@@ -212,6 +212,7 @@ fn set(args: &[String]) -> Result<String> {
         let value = options.next().cloned().ok_or_else(|| err!("{flag} needs a value"))?;
         match flag.as_str() {
             "--name" => changes.name = Some(value),
+            "--os" => changes.os = Some(value),
             "--cpus" => changes.cpus = Some(number(flag, &value)?),
             "--memory" => changes.memory_mb = Some(number(flag, &value)?),
             "--disk" => changes.disk_gb = Some(number(flag, &value)?),

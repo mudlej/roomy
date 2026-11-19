@@ -12,10 +12,11 @@ pub mod sources;
 
 pub use distros::DISTROS;
 
+use crate::catalog::{Family, GuestSystem};
 use crate::env::Env;
 use crate::process;
 use crate::{Result, err};
-use sources::{checksum_list, file_name_of, folder_of, newest, newest_folder, newest_link, version_in};
+use sources::{checksum_list, file_name_of, folder_of, newest, newest_folders, newest_link, version_in};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -63,6 +64,11 @@ pub struct Distro {
 }
 
 impl Distro {
+    /// All of a system's editions are of one family, and every system has an edition.
+    pub fn family(&self) -> Family {
+        self.editions[0].guest.family
+    }
+
     /// The edition with this short name (as used on the command line).
     pub fn edition(&self, slug: &str) -> Option<&'static Edition> {
         self.editions.iter().find(|edition| edition.slug == slug)
@@ -78,8 +84,8 @@ pub struct Edition {
     pub slug: &'static str,
     /// A few words on what sets it apart; may be empty.
     pub note: &'static str,
-    /// The guest system (a [`crate::catalog::SYSTEMS`] id) a VM installed from it should be marked as.
-    pub guest: &'static str,
+    /// What a VM installed from it should be marked as.
+    pub guest: GuestSystem,
     pub source: Source,
 }
 
@@ -100,7 +106,9 @@ pub enum Source {
     /// downloaded from next to the list, or from `fixed` when the project names its current
     /// image by a link that never changes.
     Sums { list: &'static str, pattern: &'static str, fixed: Option<&'static str> },
-    /// The highest-numbered folder linked from `index`, holding the checksum list `list`.
+    /// The highest-numbered folder linked from `index` that holds the checksum list `list`, where
+    /// `{version}` stands for the folder's name. A project may open the next release's folder
+    /// before the release is out (FreeBSD keeps its betas there), without that list.
     NewestFolder { index: &'static str, list: &'static str, pattern: &'static str },
     /// Ubuntu and its flavours: `list` with `{series}` standing for the current LTS release's code name.
     UbuntuLts { list: &'static str, pattern: &'static str },
@@ -223,12 +231,14 @@ impl<F: Fetch> Remembering<F> {
 }
 
 impl<F: Fetch> Fetch for Remembering<F> {
-    fn text(&self, url: &str) -> Result<String> {
+    fn text_if_there(&self, url: &str) -> Result<Option<String>> {
         if let Some(text) = self.texts.lock().unwrap().get(url) {
-            return Ok(text.clone());
+            return Ok(Some(text.clone()));
         }
-        let text = self.inner.text(url)?;
-        self.texts.lock().unwrap().insert(url.to_owned(), text.clone());
+        let text = self.inner.text_if_there(url)?;
+        if let Some(text) = &text {
+            self.texts.lock().unwrap().insert(url.to_owned(), text.clone());
+        }
         Ok(text)
     }
 
@@ -239,8 +249,14 @@ impl<F: Fetch> Fetch for Remembering<F> {
 
 /// Reads what projects publish. [`Curl`] reads it from the web; tests read saved copies.
 pub trait Fetch {
-    /// A small text file (an index, a checksum list, a web page).
-    fn text(&self, url: &str) -> Result<String>;
+    /// A small text file (an index, a checksum list, a web page), or `None` when the server
+    /// answers that it has no such file.
+    fn text_if_there(&self, url: &str) -> Result<Option<String>>;
+
+    fn text(&self, url: &str) -> Result<String> {
+        self.text_if_there(url)?.ok_or_else(|| err!("cannot read {url}: there is no such file"))
+    }
+
     /// The size of the file at `url`, when the server says.
     fn size(&self, url: &str) -> Option<u64>;
 }
@@ -253,6 +269,9 @@ pub struct Curl {
 
 /// Arguments that keep curl on encrypted connections, including where a server redirects to.
 const HTTPS_ONLY: [&str; 4] = ["--proto", "=https", "--proto-redir", "=https"];
+
+/// How curl ends its complaint about an address the server does not have.
+const NO_SUCH_FILE: &str = "returned error: 404";
 
 impl Curl {
     pub fn new(env: &Env) -> Result<Curl> {
@@ -275,7 +294,8 @@ impl Curl {
         outcome
     }
 
-    fn fetch_to(&self, url: &str, dest: &Path) -> Result<()> {
+    /// `Ok(false)` when the server answers that it has no such file.
+    fn fetch_if_there(&self, url: &str, dest: &Path) -> Result<bool> {
         let dest = dest.to_string_lossy();
         let mut args = vec!["--fail", "--silent", "--show-error", "--location", "--max-time", "60"];
         args.extend(HTTPS_ONLY);
@@ -283,15 +303,24 @@ impl Curl {
         let ran = process::run_capture(&self.program, &args, Duration::from_secs(70))
             .map_err(|e| err!("cannot run curl: {e}"))?;
         if ran.status.success() {
-            Ok(())
+            Ok(true)
+        } else if ran.stderr.contains(NO_SUCH_FILE) {
+            Ok(false)
         } else {
             Err(err!("cannot read {url}: {}", ran.stderr.trim().trim_start_matches("curl: ")))
+        }
+    }
+
+    fn fetch_to(&self, url: &str, dest: &Path) -> Result<()> {
+        match self.fetch_if_there(url, dest)? {
+            true => Ok(()),
+            false => Err(err!("cannot read {url}: there is no such file")),
         }
     }
 }
 
 impl Fetch for Curl {
-    fn text(&self, url: &str) -> Result<String> {
+    fn text_if_there(&self, url: &str) -> Result<Option<String>> {
         // Written to a file rather than read from curl's output: pages can be larger than what
         // `run_capture` can take in while waiting.
         static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -300,9 +329,12 @@ impl Fetch for Curl {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let outcome = self.fetch_to(url, &file).and_then(|()| {
+        let outcome = self.fetch_if_there(url, &file).and_then(|there| {
+            if !there {
+                return Ok(None);
+            }
             std::fs::read(&file)
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .map(|bytes| Some(String::from_utf8_lossy(&bytes).into_owned()))
                 .map_err(|e| err!("cannot read what {url} sent: {e}"))
         });
         let _ = std::fs::remove_file(&file);
@@ -333,6 +365,8 @@ fn content_length(headers: &str) -> Option<u64> {
     length.filter(|&size| ok && size > 0)
 }
 
+const FOLDERS_TRIED: usize = 3;
+
 const UBUNTU_RELEASES: &str = "https://changelogs.ubuntu.com/meta-release-lts";
 const FEDORA_RELEASES: &str = "https://fedoraproject.org/releases.json";
 const ALPINE_RELEASES: &str =
@@ -344,9 +378,15 @@ pub fn resolve(fetch: &dyn Fetch, source: &Source) -> Result<Image> {
     let mut image = match *source {
         Source::Sums { list, pattern, fixed } => from_sums(fetch, list, pattern, fixed)?,
         Source::NewestFolder { index, list, pattern } => {
-            let folder = newest_folder(&fetch.text(index)?)
-                .ok_or_else(|| err!("{} lists no release folders any more", host(index)))?;
-            from_sums(fetch, &format!("{index}{folder}/{list}"), pattern, None)?
+            let mut released = None;
+            for folder in newest_folders(&fetch.text(index)?).iter().take(FOLDERS_TRIED) {
+                let list = format!("{index}{folder}/{}", list.replace("{version}", folder));
+                if let Some(text) = fetch.text_if_there(&list)? {
+                    released = Some(listed_image(&text, &list, pattern, None)?);
+                    break;
+                }
+            }
+            released.ok_or_else(|| err!("{} lists no release any more", host(index)))?
         }
         Source::UbuntuLts { list, pattern } => {
             let (series, version) = sources::ubuntu_lts(&fetch.text(UBUNTU_RELEASES)?)
@@ -417,7 +457,12 @@ pub fn resolve_all<'a>(fetch: &(impl Fetch + Sync), editions: &'a [Edition]) -> 
 }
 
 fn from_sums(fetch: &dyn Fetch, list: &str, pattern: &str, fixed: Option<&str>) -> Result<Image> {
-    let listed = checksum_list(&fetch.text(list)?);
+    listed_image(&fetch.text(list)?, list, pattern, fixed)
+}
+
+/// The newest image named like `pattern` in the checksum list `text`, which was read from `list`.
+fn listed_image(text: &str, list: &str, pattern: &str, fixed: Option<&str>) -> Result<Image> {
+    let listed = checksum_list(text);
     let entry = newest(&listed, pattern)
         .ok_or_else(|| err!("{} no longer lists an image named like {pattern}", host(list)))?
         .clone();
@@ -494,13 +539,19 @@ mod tests {
     struct Saved(HashMap<&'static str, String>);
 
     impl Fetch for Saved {
-        fn text(&self, url: &str) -> Result<String> {
-            self.0.get(url).cloned().ok_or_else(|| err!("not found: {url}"))
+        fn text_if_there(&self, url: &str) -> Result<Option<String>> {
+            match self.0.get(url) {
+                Some(text) if text == UNREACHABLE => Err(err!("cannot read {url}: the server did not answer")),
+                found => Ok(found.cloned()),
+            }
         }
         fn size(&self, url: &str) -> Option<u64> {
             url.ends_with(".iso").then_some(1234)
         }
     }
+
+    /// Saved in place of a text the server fails to send.
+    const UNREACHABLE: &str = "unreachable";
 
     const SHA: &str = "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4";
 
@@ -546,6 +597,50 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_opened_for_a_coming_release_is_passed_over() {
+        let mut saved = Saved(HashMap::from([
+            (
+                "https://download.example.org/ISO-IMAGES/",
+                r#"<a href="14.5/">14.5/</a> <a href="15.1/">15.1/</a> <a href="15.2/">15.2/</a>"#.to_owned(),
+            ),
+            (
+                "https://download.example.org/ISO-IMAGES/15.2/CHECKSUM.SHA256-FreeBSD-15.2-BETA2-amd64",
+                format!("SHA256 (FreeBSD-15.2-BETA2-amd64-disc1.iso) = {SHA}\n"),
+            ),
+            (
+                "https://download.example.org/ISO-IMAGES/15.1/CHECKSUM.SHA256-FreeBSD-15.1-RELEASE-amd64",
+                format!(
+                    "SHA256 (FreeBSD-15.1-RELEASE-amd64-bootonly.iso) = {SHA}\n\
+                     SHA256 (FreeBSD-15.1-RELEASE-amd64-disc1.iso) = {SHA}\n\
+                     SHA256 (FreeBSD-15.1-RELEASE-amd64-disc1.iso.xz) = {SHA}\n"
+                ),
+            ),
+        ]));
+        let source = |pattern| Source::NewestFolder {
+            index: "https://download.example.org/ISO-IMAGES/",
+            list: "CHECKSUM.SHA256-FreeBSD-{version}-RELEASE-amd64",
+            pattern,
+        };
+        let disc = resolve(&saved, &source("FreeBSD-*-RELEASE-amd64-disc1.iso")).unwrap();
+        assert_eq!(disc.url, "https://download.example.org/ISO-IMAGES/15.1/FreeBSD-15.1-RELEASE-amd64-disc1.iso");
+        assert_eq!(disc.version, "15.1");
+        // An image the current release lacks is not looked for in an older one.
+        let missing = resolve(&saved, &source("FreeBSD-*-RELEASE-amd64-dvd1.iso")).unwrap_err();
+        assert_eq!(
+            missing.message(),
+            "download.example.org no longer lists an image named like FreeBSD-*-RELEASE-amd64-dvd1.iso"
+        );
+
+        // Nor is an older release offered because the current one's list could not be read.
+        saved.0.insert(
+            "https://download.example.org/ISO-IMAGES/15.2/CHECKSUM.SHA256-FreeBSD-15.2-RELEASE-amd64",
+            UNREACHABLE.to_owned(),
+        );
+        let unread = resolve(&saved, &source("FreeBSD-*-RELEASE-amd64-disc1.iso")).unwrap_err();
+        assert!(unread.message().ends_with("the server did not answer"), "{unread}");
+    }
+
+    #[test]
     fn unsafe_names_and_addresses_are_refused() {
         let image = |name: &str, url: &str| Image {
             version: String::new(),
@@ -578,13 +673,10 @@ mod tests {
             let mut slugs = std::collections::HashSet::new();
             for edition in distro.editions {
                 assert!(slugs.insert(edition.slug), "{} {} is listed twice", distro.id, edition.slug);
-                assert!(
-                    crate::catalog::SYSTEMS.iter().any(|s| s.id == edition.guest),
-                    "{} {}",
-                    distro.id,
-                    edition.slug
-                );
+                assert_eq!(edition.guest.family, distro.family(), "{} {}", distro.id, edition.slug);
             }
         }
+        assert_eq!(distro("fedora").map(Distro::family), Some(Family::Linux));
+        assert_eq!(distro("freebsd").map(Distro::family), Some(Family::Bsd));
     }
 }

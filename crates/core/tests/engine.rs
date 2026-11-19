@@ -135,6 +135,73 @@ fn a_failed_creation_leaves_nothing_behind() {
 }
 
 #[test]
+fn a_guest_is_only_given_what_its_system_can_use() {
+    use roomy_core::settings::{self, Changes};
+    let host = FakeHost::healthy("guestsystem");
+    let vms = host.base.join("vms");
+    let freebsd = |name: &str| NewVm { os: "freebsd".to_owned(), ..new_vm(name) };
+
+    let unknown = vm::create(&host.env(), &vms, NewVm { os: "plan9".to_owned(), ..new_vm("nine") }).unwrap_err();
+    assert!(unknown.message().starts_with("roomy does not know a guest system called 'plan9'; it knows: linux, "));
+    let mut with_gpu = freebsd("fast");
+    with_gpu.features.gpu_acceleration = true;
+    let refused = vm::create(&host.env(), &vms, with_gpu).unwrap_err();
+    assert!(refused.message().starts_with("a FreeBSD guest cannot use GPU acceleration: "), "{refused}");
+    let mut with_share = freebsd("sharing");
+    with_share.shared_folders = vec![SharedFolder { name: "docs".into(), path: host.base.clone() }];
+    let refused = vm::create(&host.env(), &vms, with_share).unwrap_err();
+    assert!(refused.message().starts_with("a FreeBSD guest cannot use shared folders: "), "{refused}");
+    assert!(!vms.join("fast").exists() && !vms.join("sharing").exists());
+
+    // Clipboard sharing is on by default, but not where it cannot work.
+    let folder = create(&host, freebsd("bsd"));
+    assert!(!folder.load().unwrap().features.clipboard);
+    let arch = create(&host, new_vm("arch"));
+    assert!(arch.load().unwrap().features.clipboard);
+
+    let change = |folder: &Folder, changes: Changes| {
+        settings::apply(&host.env(), folder, &changes)
+            .map(|applied| applied.iter().map(|applied| applied.setting).collect::<Vec<_>>())
+    };
+    let refused = change(&folder, Changes { clipboard: Some(true), ..Changes::default() }).unwrap_err();
+    assert!(refused.message().starts_with("a FreeBSD guest cannot use clipboard sharing: "), "{refused}");
+    // Everything else can be changed, and switching off what was never on is no change.
+    let renamed = Changes {
+        name: Some("BSD".into()),
+        clipboard: Some(false),
+        shared_folders: Some(vec![]),
+        ..Changes::default()
+    };
+    assert_eq!(change(&folder, renamed).unwrap(), ["name"]);
+
+    // A VM made as one system can be marked as another, once it asks for nothing the other lacks.
+    let docs = vec![SharedFolder { name: "docs".into(), path: host.base.clone() }];
+    change(&arch, Changes { shared_folders: Some(docs.clone()), ..Changes::default() }).unwrap();
+    let to_freebsd = || Changes { os: Some("freebsd".into()), ..Changes::default() };
+    let refused = change(&arch, to_freebsd()).unwrap_err();
+    assert!(refused.message().starts_with("a FreeBSD guest cannot use shared folders: "), "{refused}");
+    assert_eq!(arch.load().unwrap().os, "archlinux");
+    let moved = change(&arch, Changes { shared_folders: Some(vec![]), ..to_freebsd() }).unwrap();
+    assert_eq!(moved, ["guest system", "shared folders", "clipboard sharing"]);
+    assert!(!arch.load().unwrap().features.clipboard);
+    let unknown = change(&arch, Changes { os: Some("plan9".into()), ..Changes::default() }).unwrap_err();
+    assert!(unknown.message().starts_with("roomy does not know a guest system called 'plan9'"), "{unknown}");
+
+    // A VM whose file already asks for what its system lacks can still be changed otherwise.
+    let mut saved = folder.load().unwrap();
+    saved.shared_folders = docs.clone();
+    folder.save(&saved).unwrap();
+    let kept = Changes { name: Some("Old".into()), shared_folders: Some(docs), ..Changes::default() };
+    assert_eq!(change(&folder, kept).unwrap(), ["name"]);
+    let refused = change(&folder, Changes { gpu_acceleration: Some(true), ..Changes::default() }).unwrap_err();
+    assert!(refused.message().starts_with("a FreeBSD guest cannot use GPU acceleration: "), "{refused}");
+    assert_eq!(
+        change(&folder, Changes { shared_folders: Some(vec![]), ..Changes::default() }).unwrap(),
+        ["shared folders"]
+    );
+}
+
+#[test]
 fn pause_resume_and_graceful_shutdown() {
     let host = FakeHost::healthy("life");
     let env = host.env();
@@ -348,6 +415,31 @@ fn the_guest_clock_is_corrected_on_resume_when_an_agent_is_listening() {
     assert_eq!(request["execute"], "guest-set-time");
     let sent = request["arguments"]["time"].as_u64().expect("an explicit time, never the guest's hardware clock");
     assert!(sent >= before && sent < before + 10_000_000_000, "{sent} vs {before}");
+
+    control::request(&env, &folder, Request::ForceOff).unwrap();
+    running.join().unwrap();
+}
+
+#[test]
+fn an_agent_that_set_the_clock_but_not_the_hardware_clock_has_done_its_job() {
+    let host = FakeHost::healthy("clockbsd");
+    let env = host.env();
+    // As FreeBSD's agent answers: the time was set, and the program for the next step does not exist there.
+    host.configure_qemu(
+        r#"{"agent": "child process has failed to set hardware clock to system time: failed to exec '/sbin/hwclock': No such file or directory"}"#,
+    );
+    let folder = create(&host, new_vm("vm"));
+    let running = boot(&host, &folder);
+    control::request(&env, &folder, Request::Pause).unwrap();
+    assert_eq!(control::request(&env, &folder, Request::Resume).unwrap().note, None);
+
+    host.configure_qemu(r#"{"agent": "Failed to set time to guest: Operation not permitted"}"#);
+    control::request(&env, &folder, Request::Pause).unwrap();
+    let note = control::request(&env, &folder, Request::Resume).unwrap().note;
+    assert_eq!(
+        note.as_deref(),
+        Some("The guest's clock may be behind: Failed to set time to guest: Operation not permitted")
+    );
 
     control::request(&env, &folder, Request::ForceOff).unwrap();
     running.join().unwrap();

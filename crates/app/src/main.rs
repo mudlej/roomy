@@ -27,8 +27,9 @@ Usage:
                   [--memory <MB>] [--disk <GB>] [--iso <path>] [--from-disk <qcow2>]
                   [--gpu] [--no-network] [--share <name>=<folder>]... [--forward <host>:<guest>]...
       Create a virtual machine in its own folder (default location: ~/Virtual-Machines).
+      --os names the guest system, linux unless given. One of: {systems}.
   roomy vm list                       The virtual machines in your library
-  roomy vm set <vm-folder> [--name <name>] [--cpus <n>] [--memory <MB>] [--disk <GB>]
+  roomy vm set <vm-folder> [--name <name>] [--os <id>] [--cpus <n>] [--memory <MB>] [--disk <GB>]
                [--gpu on|off] [--network on|off] [--clipboard on|off] [--microphone on|off]
                [--share <name>=<folder>]... [--unshare <name>]... [--forward <host>:<guest>]... [--unforward <host>]...
       Change settings. Each change is reported as in effect already or waiting for the next boot.
@@ -82,7 +83,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "--help" | "-h" | "help" => {
-            print!("{HELP}");
+            print!("{}", help());
             ExitCode::SUCCESS
         }
         other => usage_error(&format!("unknown command '{other}'")),
@@ -140,8 +141,12 @@ fn full_report(env: &Env) -> Report {
     report
 }
 
+fn help() -> String {
+    HELP.replace("{systems}", &roomy_core::catalog::ids())
+}
+
 pub(crate) fn usage_error(message: &str) -> ExitCode {
-    eprintln!("roomy: {message}\n\n{HELP}");
+    eprintln!("roomy: {message}\n\n{}", help());
     ExitCode::from(EXIT_USAGE)
 }
 

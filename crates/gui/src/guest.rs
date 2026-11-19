@@ -2,7 +2,7 @@
 //! feature works, with commands ready to copy.
 
 use adw::prelude::*;
-use roomy_core::catalog;
+use roomy_core::catalog::{self, Feature};
 use roomy_core::vm::Config;
 
 /// A row showing a command with a button that copies it.
@@ -26,12 +26,12 @@ pub fn show(parent: &impl IsA<gtk::Widget>, config: &Config, guest_agent: Option
         .title("Helpers inside the guest")
         .description("Run this in a terminal inside the virtual machine. Without the helpers the virtual machine still works; these features do not.")
         .build();
-    let system = catalog::system(&config.os);
+    let system = config.system();
     match system.install_helpers {
         Some(command) => helpers.add(&command_row(&format!("Install on {}", system.label), command)),
         None => helpers.add(&crate::plain_row("Install", &catalog::generic_install_advice())),
     }
-    for (package, purpose) in catalog::HELPERS {
+    for (package, purpose) in system.helpers() {
         helpers.add(&crate::plain_row(package, purpose));
     }
     let status = match guest_agent {
@@ -42,7 +42,19 @@ pub fn show(parent: &impl IsA<gtk::Widget>, config: &Config, guest_agent: Option
     helpers.add(&crate::plain_row("Guest agent", status));
     page.add(&helpers);
 
+    if !system.lacks.is_empty() {
+        let lacking = adw::PreferencesGroup::builder()
+            .title(format!("Not available in a {} guest", system.label))
+            .description("Nothing that can be installed in the guest changes these.")
+            .build();
+        for (feature, why) in system.lacks {
+            lacking.add(&crate::plain_row(&feature.title(), why));
+        }
+        page.add(&lacking);
+    }
+
     let folders = adw::PreferencesGroup::builder().title("Shared folders").build();
+    folders.set_visible(system.offers(Feature::SharedFolders));
     if config.shared_folders.is_empty() {
         folders.set_description(Some("This virtual machine has no shared folders. Add one in its settings."));
     } else {

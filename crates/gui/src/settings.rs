@@ -2,7 +2,8 @@
 
 use crate::Context;
 use crate::fields::{
-    Amount, FeatureSwitches, Form, Holder, PortForwards, SHARED_FOLDERS_IN_THE_GUEST, SharedFolders, host_size,
+    Amount, FeatureSwitches, Form, Holder, PortForwards, SHARED_FOLDERS_IN_THE_GUEST, SharedFolders, SystemRow,
+    host_size,
 };
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -81,7 +82,8 @@ fn build(
     };
 
     let name = adw::EntryRow::builder().title("Name").text(config.name.as_str()).build();
-    let switches = FeatureSwitches::new(&config.features);
+    let system = SystemRow::new(config.system());
+    let switches = Rc::new(FeatureSwitches::new(&config.features));
     // A disk only grows, and by no more than there is room for where it is kept.
     let disk =
         Amount::new("Disk (GB)", disk_gb as f64, free_gb.map_or(16384.0, |free| (disk_gb + free) as f64), 1.0, 0);
@@ -94,6 +96,7 @@ fn build(
     let immediate = adw::PreferencesGroup::builder().title("Takes effect immediately").build();
     for row in [
         name.upcast_ref::<gtk::Widget>(),
+        system.row.upcast_ref(),
         switches.network.upcast_ref(),
         switches.clipboard.upcast_ref(),
         switches.microphone.upcast_ref(),
@@ -117,7 +120,16 @@ fn build(
     hardware.add(&memory.row);
     hardware.add(&switches.gpu);
 
-    let shared = SharedFolders::new(config.shared_folders.clone(), &format!("{later} {SHARED_FOLDERS_IN_THE_GUEST}"));
+    let shared =
+        Rc::new(SharedFolders::new(config.shared_folders.clone(), &format!("{later} {SHARED_FOLDERS_IN_THE_GUEST}")));
+    system.on_choice({
+        let (switches, shared, saved) = (switches.clone(), shared.clone(), config.clone());
+        move |system| {
+            let kept = |feature| system == saved.system() && saved.asks_for(feature);
+            switches.fit(&system, kept);
+            shared.fit(&system, kept);
+        }
+    });
     let forwarded = adw::PreferencesGroup::builder()
         .title("Forwarded ports")
         .description(format!("Reachable from this computer only. {later}"))
@@ -138,6 +150,9 @@ fn build(
             let features = switches.get();
             let changes = Changes {
                 name: Some(name.text().to_string()),
+                os: Some(system.chosen())
+                    .filter(|chosen| *chosen != config.system())
+                    .map(|chosen| chosen.id.to_owned()),
                 cpus: Some(cpus.value() as u32),
                 memory_mb: Some(if memory.value() == memory_as_shown {
                     config.memory_mb
